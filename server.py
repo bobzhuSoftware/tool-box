@@ -6,6 +6,7 @@ import re
 import shutil
 import tempfile
 import threading
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 
@@ -19,6 +20,18 @@ from sqlalchemy.orm import DeclarativeBase, Session
 
 import whisper
 import yt_dlp
+try:
+    import zhconv
+    _has_zhconv = True
+except ImportError:
+    _has_zhconv = False
+
+
+def to_simplified(text: str, language: str) -> str:
+    """Convert Traditional Chinese to Simplified if language is Chinese."""
+    if _has_zhconv and (language.startswith('zh') or language in ('yue', 'chinese', 'cantonese')):
+        return zhconv.convert(text, 'zh-hans')
+    return text
 
 # ---------------------------------------------------------------------------
 # FFmpeg setup
@@ -140,6 +153,55 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _count_words(text: str) -> int:
+    """Count words in a language-aware way (CJK chars count individually)."""
+    cjk = sum(1 for c in text if unicodedata.east_asian_width(c) in ('W', 'F'))
+    if cjk > len(text) * 0.3:
+        return cjk
+    return len(text.split())
+
+
+def merge_segments(
+    raw_segments: list[dict],
+    min_words: int = 40,
+    max_words: int = 60,
+) -> list[dict]:
+    """
+    Merge short Whisper segments into semantically coherent chunks.
+    Flushes when word count reaches min_words AND the segment ends with
+    sentence-ending punctuation, or unconditionally at max_words.
+    """
+    SENTENCE_END = re.compile(r'[.?!。？！…]+\s*$')
+
+    merged: list[dict] = []
+    buf: list[dict] = []
+    buf_words = 0
+
+    for seg in raw_segments:
+        text = seg["text"].strip()
+        buf.append(seg)
+        buf_words += _count_words(text)
+
+        at_boundary = bool(SENTENCE_END.search(text))
+        if (buf_words >= min_words and at_boundary) or buf_words >= max_words:
+            merged.append({
+                "start": format_timestamp(buf[0]["start"]),
+                "end": format_timestamp(buf[-1]["end"]),
+                "text": " ".join(s["text"].strip() for s in buf),
+            })
+            buf = []
+            buf_words = 0
+
+    if buf:
+        merged.append({
+            "start": format_timestamp(buf[0]["start"]),
+            "end": format_timestamp(buf[-1]["end"]),
+            "text": " ".join(s["text"].strip() for s in buf),
+        })
+
+    return merged
+
+
 @app.post("/api/transcribe", response_model=TranscribeResponse)
 def transcribe(req: TranscribeRequest):
     try:
@@ -154,25 +216,22 @@ def transcribe(req: TranscribeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     job_id = uuid.uuid4().hex[:12]
-    segments = [
-        {
-            "start": format_timestamp(seg["start"]),
-            "end": format_timestamp(seg["end"]),
-            "text": seg["text"].strip(),
-        }
-        for seg in result["segments"]
-    ]
+    detected_lang = result.get("language", "unknown")
+    segments = merge_segments(result["segments"])
+    full_text = to_simplified(result["text"].strip(), detected_lang)
+    for seg in segments:
+        seg["text"] = to_simplified(seg["text"], detected_lang)
 
     jobs[job_id] = {
-        "text": result["text"].strip(),
-        "language": result.get("language", "unknown"),
+        "text": full_text,
+        "language": detected_lang,
         "segments": segments,
     }
 
     return TranscribeResponse(
         job_id=job_id,
-        text=result["text"].strip(),
-        language=result.get("language", "unknown"),
+        text=full_text,
+        language=detected_lang,
         segments=segments,
     )
 
@@ -314,19 +373,15 @@ async def transcribe_stream(req: TranscribeRequest):
                 result = model.transcribe(audio_path, **options)
 
             job_id = uuid.uuid4().hex[:12]
-            segments = [
-                {
-                    "start": format_timestamp(seg["start"]),
-                    "end": format_timestamp(seg["end"]),
-                    "text": seg["text"].strip(),
-                }
-                for seg in result["segments"]
-            ]
+            segments = merge_segments(result["segments"])
 
             detected_lang = result.get("language", "unknown")
+            full_text = to_simplified(result["text"].strip(), detected_lang)
+            for seg in segments:
+                seg["text"] = to_simplified(seg["text"], detected_lang)
 
             jobs[job_id] = {
-                "text": result["text"].strip(),
+                "text": full_text,
                 "language": detected_lang,
                 "segments": segments,
                 "title": video_title,
@@ -339,14 +394,14 @@ async def transcribe_stream(req: TranscribeRequest):
                 url=req.url,
                 language=detected_lang,
                 model=req.model,
-                text=result["text"].strip(),
+                text=full_text,
                 segments=segments,
             )
 
             q.put({
                 "type": "done",
                 "job_id": job_id,
-                "text": result["text"].strip(),
+                "text": full_text,
                 "language": detected_lang,
                 "segments": segments,
                 "title": video_title,

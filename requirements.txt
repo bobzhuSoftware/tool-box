@@ -3,3 +3,4 @@ openai-whisper
 fastapi
 uvicorn[standard]
 sqlalchemy
+zhconv

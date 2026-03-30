@@ -26,7 +26,7 @@ Open two terminals:
 
 ```bash
 # Terminal 1 — Start the backend (port 8000)
-uvicorn server:app --reload
+python -m uvicorn server:app --reload
 
 # Terminal 2 — Start the frontend (port 5173)
 cd frontend

@@ -223,14 +223,20 @@
 }
 
 .segment {
-  margin-bottom: 0.4rem;
+  margin-bottom: 1.2rem;
 }
 
 .segment .time {
   color: #888;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-family: 'Consolas', monospace;
-  margin-right: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.segment-text {
+  margin: 0;
+  line-height: 1.7;
+  color: #1a1a2e;
 }
 
 .download-row {
@@ -296,6 +302,13 @@
   font-size: 1.1rem;
   color: #1a1a2e;
   margin-bottom: 1rem;
+}
+
+.history-empty {
+  color: #999;
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 1rem 0;
 }
 
 .history-list {

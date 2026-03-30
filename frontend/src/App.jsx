@@ -28,6 +28,7 @@ function App() {
   const [progressLog, setProgressLog] = useState([])
   const [result, setResult] = useState(null)
   const [history, setHistory] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(true)
   const logEndRef = useRef(null)
 
   const fetchHistory = useCallback(async () => {
@@ -35,6 +36,7 @@ function App() {
       const res = await fetch('/api/history')
       if (res.ok) setHistory(await res.json())
     } catch {}
+    finally { setHistoryLoading(false) }
   }, [])
 
   useEffect(() => { fetchHistory() }, [fetchHistory])
@@ -218,8 +220,8 @@ function App() {
           <div className="transcript-box">
             {result.segments.map((seg, i) => (
               <div className="segment" key={i}>
-                <span className="time">[{seg.start} → {seg.end}]</span>
-                {seg.text}
+                <div className="time">[{seg.start} → {seg.end}]</div>
+                <p className="segment-text">{seg.text}</p>
               </div>
             ))}
           </div>
@@ -235,9 +237,13 @@ function App() {
       )}
 
       {/* History */}
-      {history.length > 0 && (
-        <div className="history-section">
-          <h2>Recent Transcripts</h2>
+      <div className="history-section">
+        <h2>Recent Transcripts</h2>
+        {historyLoading ? (
+          <p className="history-empty">Loading...</p>
+        ) : history.length === 0 ? (
+          <p className="history-empty">No transcripts yet. Paste a video URL above to get started.</p>
+        ) : (
           <ul className="history-list">
             {history.map((item) => (
               <li key={item.job_id} className="history-item">
@@ -261,8 +267,8 @@ function App() {
               </li>
             ))}
           </ul>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   )
 }
