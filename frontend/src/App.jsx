@@ -1,0 +1,270 @@
+import { useState, useRef, useEffect, useCallback } from 'react'
+import './App.css'
+
+function formatDate(iso) {
+  const d = new Date(iso)
+  return d.toLocaleString()
+}
+
+function App() {
+  const [platform, setPlatform] = useState('youtube')
+  const [url, setUrl] = useState('')
+  const [model, setModel] = useState('base')
+  const [language, setLanguage] = useState('')
+
+  const PLATFORMS = {
+    youtube: {
+      label: 'YouTube',
+      placeholder: 'e.g. https://www.youtube.com/watch?v=...',
+      icon: '▶',
+    },
+    bilibili: {
+      label: 'Bilibili',
+      placeholder: 'e.g. https://www.bilibili.com/video/BV...',
+      icon: '📺',
+    },
+  }
+  const [loading, setLoading] = useState(false)
+  const [progressLog, setProgressLog] = useState([])
+  const [result, setResult] = useState(null)
+  const [history, setHistory] = useState([])
+  const logEndRef = useRef(null)
+
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/history')
+      if (res.ok) setHistory(await res.json())
+    } catch {}
+  }, [])
+
+  useEffect(() => { fetchHistory() }, [fetchHistory])
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [progressLog])
+
+  const addLog = (entry) => {
+    // Download progress lines update in-place instead of stacking
+    if (entry.type === 'progress') {
+      setProgressLog(prev => {
+        const last = prev[prev.length - 1]
+        if (last?.type === 'progress') {
+          return [...prev.slice(0, -1), entry]
+        }
+        return [...prev, entry]
+      })
+    } else {
+      setProgressLog(prev => [...prev, entry])
+    }
+  }
+
+  const handleTranscribe = async () => {
+    if (!url.trim()) return
+    setLoading(true)
+    setProgressLog([])
+    setResult(null)
+
+    try {
+      const body = { url: url.trim(), model }
+      if (language.trim()) body.language = language.trim()
+
+      const response = await fetch('/api/transcribe/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || `Server error (${response.status})`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
+
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6))
+                if (event.type === 'done') {
+                  setResult(event)
+                  addLog({ type: 'done', message: `Transcription complete! Detected language: ${event.language}` })
+                  fetchHistory() // refresh history list
+                } else {
+                  addLog(event)
+                }
+              } catch { /* ignore malformed SSE lines */ }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      addLog({ type: 'error', message: err.message || 'Something went wrong' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDownload = (jobId, withTimestamps) => {
+    const ts = withTimestamps ? 'true' : 'false'
+    window.open(`/api/download/${jobId}?timestamps=${ts}`, '_blank')
+  }
+
+  const handleDelete = async (jobId) => {
+    if (!window.confirm('Delete this transcript record?')) return
+    await fetch(`/api/history/${jobId}`, { method: 'DELETE' })
+    fetchHistory()
+    if (result?.job_id === jobId) setResult(null)
+  }
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !loading) handleTranscribe()
+  }
+
+  return (
+    <div className="app">
+      <h1>Video Transcript Generator</h1>
+
+      {/* Input Section */}
+      <div className="input-section">
+        {/* Platform Toggle */}
+        <div className="platform-toggle">
+          {Object.entries(PLATFORMS).map(([key, p]) => (
+            <button
+              key={key}
+              className={`platform-btn ${platform === key ? 'active' : ''}`}
+              onClick={() => { setPlatform(key); setUrl('') }}
+              disabled={loading}
+            >
+              {p.icon} {p.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="url-row">
+          <input
+            type="text"
+            placeholder={PLATFORMS[platform].placeholder}
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={loading}
+          />
+          <button onClick={handleTranscribe} disabled={loading || !url.trim()}>
+            {loading ? 'Transcribing...' : 'Transcribe'}
+          </button>
+        </div>
+        <div className="options-row">
+          <label>
+            Model
+            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loading}>
+              <option value="tiny">tiny (fastest)</option>
+              <option value="base">base (default)</option>
+              <option value="small">small</option>
+              <option value="medium">medium</option>
+              <option value="large">large (best)</option>
+            </select>
+          </label>
+          <label>
+            Language (optional)
+            <input
+              type="text"
+              placeholder="e.g. en, zh, de"
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              disabled={loading}
+              style={{ width: '120px' }}
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Progress Log */}
+      {progressLog.length > 0 && (
+        <div className="progress-section">
+          <div className="progress-log">
+            {progressLog.map((entry, i) => (
+              <div key={i} className={`log-entry log-${entry.type}`}>
+                <span className="log-icon">
+                  {entry.type === 'done' ? '✓' :
+                   entry.type === 'error' ? '✕' :
+                   entry.type === 'progress' ? '↓' : '●'}
+                </span>
+                <span className="log-message">{entry.message}</span>
+              </div>
+            ))}
+            {loading && <div className="log-entry log-status"><span className="spinner" />Waiting...</div>}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+      )}
+
+      {/* Result */}
+      {result && (
+        <div className="result-section">
+          <div className="result-header">
+            <h2>Transcript</h2>
+            <span className="lang-badge">Language: {result.language}</span>
+          </div>
+          <div className="transcript-box">
+            {result.segments.map((seg, i) => (
+              <div className="segment" key={i}>
+                <span className="time">[{seg.start} → {seg.end}]</span>
+                {seg.text}
+              </div>
+            ))}
+          </div>
+          <div className="download-row">
+            <button className="btn-primary" onClick={() => handleDownload(result.job_id, true)}>
+              Download with timestamps
+            </button>
+            <button className="btn-outline" onClick={() => handleDownload(result.job_id, false)}>
+              Download plain text
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* History */}
+      {history.length > 0 && (
+        <div className="history-section">
+          <h2>Recent Transcripts</h2>
+          <ul className="history-list">
+            {history.map((item) => (
+              <li key={item.job_id} className="history-item">
+                <div className="history-info">
+                  <span className="history-title">{item.title}</span>
+                  <span className="history-meta">
+                    {item.language} · {item.model} · {formatDate(item.created_at)}
+                  </span>
+                </div>
+                <div className="history-actions">
+                  <button className="btn-sm btn-primary" onClick={() => handleDownload(item.job_id, true)}>
+                    ↓ Timestamps
+                  </button>
+                  <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, false)}>
+                    ↓ Plain
+                  </button>
+                  <button className="btn-sm btn-danger" onClick={() => handleDelete(item.job_id)}>
+                    ✕
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default App

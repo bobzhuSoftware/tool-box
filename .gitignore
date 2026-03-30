@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Whisper model cache (downloaded automatically, too large for git)
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
