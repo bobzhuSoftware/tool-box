@@ -29,7 +29,7 @@ function App() {
   const [result, setResult] = useState(null)
   const [history, setHistory] = useState([])
   const [historyLoading, setHistoryLoading] = useState(true)
-  const logEndRef = useRef(null)
+  const logContainerRef = useRef(null)
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -42,7 +42,10 @@ function App() {
   useEffect(() => { fetchHistory() }, [fetchHistory])
 
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = logContainerRef.current
+    if (!el) return
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    if (isNearBottom) el.scrollTop = el.scrollHeight
   }, [progressLog])
 
   const addLog = (entry) => {
@@ -193,7 +196,7 @@ function App() {
       {/* Progress Log */}
       {progressLog.length > 0 && (
         <div className="progress-section">
-          <div className="progress-log">
+          <div className="progress-log" ref={logContainerRef}>
             {progressLog.map((entry, i) => (
               <div key={i} className={`log-entry log-${entry.type}`}>
                 <span className="log-icon">
@@ -205,7 +208,6 @@ function App() {
               </div>
             ))}
             {loading && <div className="log-entry log-status"><span className="spinner" />Waiting...</div>}
-            <div ref={logEndRef} />
           </div>
         </div>
       )}
