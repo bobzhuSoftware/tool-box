@@ -51,6 +51,37 @@ python transcribe.py "https://www.youtube.com/watch?v=VIDEO_ID"
 python transcribe.py "https://www.youtube.com/watch?v=VIDEO_ID" -m medium -l en
 ```
 
+## YouTube Authentication (Bot Detection Fix)
+
+If you see a "Sign in to confirm you're not a bot" error, YouTube is blocking yt-dlp. Fix it with one of these options:
+
+**Option A — Export a `cookies.txt` file (recommended)**
+
+1. Install the [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) extension in Chrome/Edge
+2. Log in to YouTube
+3. Click the extension and export cookies for `youtube.com`
+4. Save the file as `cookies.txt` in the project root (next to `server.py`)
+
+The backend will detect and use it automatically on the next request.
+
+**Option B — Use browser cookies directly (no file needed)**
+
+Set the `YOUTUBE_COOKIES_BROWSER` environment variable to your browser name before starting the server:
+
+```bash
+# PowerShell
+$env:YOUTUBE_COOKIES_BROWSER = "chrome"   # or "firefox", "edge", "brave"
+python -m uvicorn server:app --reload
+```
+
+```bash
+# CMD / bash
+set YOUTUBE_COOKIES_BROWSER=chrome
+python -m uvicorn server:app --reload
+```
+
+> Option A is more reliable. Option B requires the browser to be closed or may need elevated permissions on some systems.
+
 ## Whisper Model Sizes
 
 | Model  | Parameters | Speed   | Accuracy |

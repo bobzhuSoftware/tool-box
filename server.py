@@ -115,6 +115,21 @@ class TranscribeResponse(BaseModel):
     segments: list[dict]
 
 
+# ---------------------------------------------------------------------------
+# Cookie resolution (YouTube bot-detection bypass)
+# ---------------------------------------------------------------------------
+_COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+_COOKIES_BROWSER = os.environ.get("YOUTUBE_COOKIES_BROWSER")  # e.g. "chrome", "firefox"
+
+
+def _apply_cookies(ydl_opts: dict) -> None:
+    """Inject cookie configuration into yt-dlp options if available."""
+    if os.path.isfile(_COOKIES_FILE):
+        ydl_opts["cookiefile"] = _COOKIES_FILE
+    elif _COOKIES_BROWSER:
+        ydl_opts["cookiesfrombrowser"] = (_COOKIES_BROWSER,)
+
+
 def download_audio(video_url: str, output_dir: str) -> str:
     output_template = os.path.join(output_dir, "audio.%(ext)s")
     ydl_opts = {
@@ -131,6 +146,7 @@ def download_audio(video_url: str, output_dir: str) -> str:
     }
     if FFMPEG_LOCATION:
         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+    _apply_cookies(ydl_opts)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
     audio_path = os.path.join(output_dir, "audio.mp3")

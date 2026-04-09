@@ -7,6 +7,10 @@ import whisper
 import yt_dlp
 
 
+_COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
+_COOKIES_BROWSER = os.environ.get("YOUTUBE_COOKIES_BROWSER")  # e.g. "chrome", "firefox"
+
+
 def download_audio(video_url: str, output_dir: str) -> str:
     """Download audio from a YouTube video and return the file path."""
     output_template = os.path.join(output_dir, "audio.%(ext)s")
@@ -23,6 +27,10 @@ def download_audio(video_url: str, output_dir: str) -> str:
         "quiet": False,
         "no_warnings": False,
     }
+    if os.path.isfile(_COOKIES_FILE):
+        ydl_opts["cookiefile"] = _COOKIES_FILE
+    elif _COOKIES_BROWSER:
+        ydl_opts["cookiesfrombrowser"] = (_COOKIES_BROWSER,)
 
     print(f"Downloading audio from: {video_url}")
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
