@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import (
     Column, DateTime, String, Text, create_engine
@@ -52,7 +53,12 @@ if FFMPEG_LOCATION and FFMPEG_LOCATION not in os.environ.get("PATH", ""):
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
-DB_PATH = os.path.join(os.path.dirname(__file__), "transcripts.db")
+# On Fly.io set env var DB_PATH=/data/transcripts.db (persisted Volume).
+# Locally falls back to the project directory.
+DB_PATH = os.environ.get(
+    "DB_PATH",
+    os.path.join(os.path.dirname(__file__), "transcripts.db"),
+)
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
 
@@ -447,3 +453,21 @@ async def transcribe_stream(req: TranscribeRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Serve React frontend (production build)
+# Must be registered AFTER all /api/* routes
+# ---------------------------------------------------------------------------
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")),
+        name="assets",
+    )
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):  # noqa: ARG001
+        """Catch-all: return index.html so React Router handles client-side nav."""
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))

@@ -1,0 +1,46 @@
+# fly.toml - Fly.io deployment configuration
+# Deploy with: fly deploy
+# First time: fly launch --no-deploy, then fly deploy
+
+app = "video-transcript"       # 修改成你自己的应用名（全局唯一）
+primary_region = "sin"         # 新加坡节点，可改为 hkg / nrt / lax 等
+
+[build]
+  # 使用项目根目录的 Dockerfile（需要自行创建）
+
+[env]
+  DB_PATH = "/data/transcripts.db"
+
+# 持久化卷，防止重启后 SQLite 数据丢失
+[mounts]
+  source = "transcripts_data"   # fly volume create transcripts_data --size 1
+  destination = "/data"
+
+# 机器规格：whisper medium 模型约需 2-4GB 内存
+[[vm]]
+  memory = "4gb"
+  cpu_kind = "shared"
+  cpus = 2
+
+# HTTP 服务配置
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"   # 无流量时自动休眠（节省费用）
+  auto_start_machines = true
+  min_machines_running = 0
+
+  # 健康检查（FastAPI 根路径需能返回 200，或改成你的实际存在的接口）
+  [http_service.checks]
+    [http_service.checks.alive]
+      grace_period = "30s"      # 启动预热时间较长（加载 whisper 模型）
+      interval = "30s"
+      timeout = "10s"
+      method = "GET"
+      path = "/api/history"
+
+  # 并发限制（转录任务很耗 CPU，不建议太高）
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 3
+    hard_limit = 5

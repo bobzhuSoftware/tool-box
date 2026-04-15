@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Database (don't bake data into the image)
+*.db
+*.sqlite
+*.sqlite3
+
+# Cookies (sensitive - use Fly.io secrets instead)
+cookies.txt
+
+# Frontend dev artifacts (only need the built dist/)
+frontend/node_modules/
+frontend/dist/       # re-built inside Docker
+
+# Local config / secrets
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
