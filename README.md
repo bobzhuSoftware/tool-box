@@ -12,17 +12,32 @@ A web app that generates transcripts from YouTube videos using [yt-dlp](https://
 ## Setup
 
 ```bash
+# One-click install all dependencies (Python + frontend)
+npm run setup
+```
+
+Or install manually:
+
+```bash
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install frontend dependencies
-cd frontend
+# Install root + frontend Node dependencies
 npm install
+cd frontend && npm install
 ```
 
 ## Running
 
-Open two terminals:
+**One-click start (recommended):**
+
+```bash
+npm run dev
+```
+
+This starts both the backend (port 8000) and frontend (port 5173) simultaneously using `concurrently`.
+
+**Or start separately in two terminals:**
 
 ```bash
 # Terminal 1 — Start the backend (port 8000)
@@ -31,6 +46,13 @@ python -m uvicorn server:app --reload
 # Terminal 2 — Start the frontend (port 5173)
 cd frontend
 npm run dev
+```
+
+**Other commands:**
+
+```bash
+npm run build    # Build frontend for production
+npm run start    # Start backend only (production)
 ```
 
 Then open **http://localhost:5173** in your browser.

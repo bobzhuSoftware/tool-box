@@ -1,0 +1,17 @@
+{
+  "name": "video-transcript-root",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "install:frontend": "cd frontend && npm install",
+    "dev:backend": "uvicorn server:app --reload --host 0.0.0.0 --port 8000",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "build": "cd frontend && npm run build",
+    "start": "uvicorn server:app --host 0.0.0.0 --port 8000",
+    "setup": "pip install -r requirements.txt && npm run install:frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
