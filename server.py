@@ -8,14 +8,17 @@ import tempfile
 import threading
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
+import bcrypt as _bcrypt
+from jose import JWTError, jwt
 from pydantic import BaseModel
 from sqlalchemy import (
-    Column, DateTime, String, Text, create_engine
+    Column, DateTime, ForeignKey, String, Text, create_engine
 )
 from sqlalchemy.orm import DeclarativeBase, Session
 
@@ -66,10 +69,20 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=lambda: uuid.uuid4().hex)
+    username = Column(String(80), unique=True, nullable=False, index=True)
+    password_hash = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class TranscriptRecord(Base):
     __tablename__ = "transcripts"
 
     job_id = Column(String(24), primary_key=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     title = Column(String(200), nullable=False)
     url = Column(Text, nullable=False)
     language = Column(String(20), nullable=False)
@@ -81,12 +94,22 @@ class TranscriptRecord(Base):
 
 Base.metadata.create_all(engine)
 
+# Lightweight migration: add user_id column if upgrading from older schema
+with engine.connect() as conn:
+    from sqlalchemy import inspect as sa_inspect, text
+    cols = [c["name"] for c in sa_inspect(engine).get_columns("transcripts")]
+    if "user_id" not in cols:
+        conn.execute(text("ALTER TABLE transcripts ADD COLUMN user_id VARCHAR(36)"))
+        conn.commit()
+
 
 def save_to_db(job_id: str, title: str, url: str, language: str,
-               model: str, text: str, segments: list[dict]) -> None:
+               model: str, text: str, segments: list[dict],
+               user_id: str | None = None) -> None:
     with Session(engine) as session:
         record = TranscriptRecord(
             job_id=job_id,
+            user_id=user_id,
             title=title,
             url=url,
             language=language,
@@ -100,12 +123,69 @@ def save_to_db(job_id: str, title: str, url: str, language: str,
 
 
 # ---------------------------------------------------------------------------
+# Auth / JWT configuration
+# ---------------------------------------------------------------------------
+# Generate a real secret in production: python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY = os.environ.get("SECRET_KEY", "change-me-to-a-random-secret-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 24h
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login", auto_error=False)
+
+
+def _hash_password(password: str) -> str:
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    return _bcrypt.checkpw(plain.encode(), hashed.encode())
+
+
+def _create_access_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(token: str | None = Depends(oauth2_scheme)) -> User | None:
+    """Return the authenticated User or None (for optional auth)."""
+    if token is None:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str | None = payload.get("sub")
+        if user_id is None:
+            return None
+    except JWTError:
+        return None
+    with Session(engine) as session:
+        return session.get(User, user_id)
+
+
+def require_user(user: User | None = Depends(get_current_user)) -> User:
+    """Raise 401 if no valid user."""
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+# ---------------------------------------------------------------------------
 # App & in-memory job cache
 # ---------------------------------------------------------------------------
 app = FastAPI()
 
 # In-memory cache so downloads within the same session are fast
 jobs: dict[str, dict] = {}
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
 
 
 class TranscribeRequest(BaseModel):
@@ -119,6 +199,47 @@ class TranscribeResponse(BaseModel):
     text: str
     language: str
     segments: list[dict]
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+@app.post("/api/register")
+def register(req: RegisterRequest):
+    username = req.username.strip()
+    if not username or len(username) < 2:
+        raise HTTPException(status_code=400, detail="Username must be at least 2 characters")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    with Session(engine) as session:
+        existing = session.query(User).filter(User.username == username).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already exists")
+        user = User(
+            id=uuid.uuid4().hex,
+            username=username,
+            password_hash=_hash_password(req.password),
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(user)
+        session.commit()
+        token = _create_access_token({"sub": user.id})
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/api/login")
+def login(req: RegisterRequest):
+    with Session(engine) as session:
+        user = session.query(User).filter(User.username == req.username.strip()).first()
+    if not user or not _verify_password(req.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = _create_access_token({"sub": user.id})
+    return {"access_token": token, "token_type": "bearer", "username": user.username}
+
+
+@app.get("/api/me")
+def get_me(user: User = Depends(require_user)):
+    return {"username": user.username}
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +346,7 @@ def merge_segments(
 
 
 @app.post("/api/transcribe", response_model=TranscribeResponse)
-def transcribe(req: TranscribeRequest):
+def transcribe(req: TranscribeRequest, user: User = Depends(require_user)):
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_path = download_audio(req.url, tmp_dir)
@@ -259,10 +380,11 @@ def transcribe(req: TranscribeRequest):
 
 
 @app.get("/api/history")
-def get_history():
+def get_history(user: User = Depends(require_user)):
     with Session(engine) as session:
         records = (
             session.query(TranscriptRecord)
+            .filter(TranscriptRecord.user_id == user.id)
             .order_by(TranscriptRecord.created_at.desc())
             .limit(50)
             .all()
@@ -281,10 +403,10 @@ def get_history():
 
 
 @app.delete("/api/history/{job_id}")
-def delete_history(job_id: str):
+def delete_history(job_id: str, user: User = Depends(require_user)):
     with Session(engine) as session:
         record = session.get(TranscriptRecord, job_id)
-        if not record:
+        if not record or record.user_id != user.id:
             raise HTTPException(status_code=404, detail="Record not found")
         session.delete(record)
         session.commit()
@@ -293,13 +415,25 @@ def delete_history(job_id: str):
 
 
 @app.get("/api/download/{job_id}")
-def download_transcript(job_id: str, timestamps: bool = True):
+def download_transcript(job_id: str, timestamps: bool = True, token: str | None = None, user: User | None = Depends(get_current_user)):
+    # Support token as query param for browser window.open() downloads
+    if user is None and token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid = payload.get("sub")
+            if uid:
+                with Session(engine) as s:
+                    user = s.get(User, uid)
+        except JWTError:
+            pass
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     # Try in-memory cache first, fall back to database
     job = jobs.get(job_id)
     if not job:
         with Session(engine) as session:
             record = session.get(TranscriptRecord, job_id)
-            if not record:
+            if not record or record.user_id != user.id:
                 raise HTTPException(status_code=404, detail="Job not found")
             job = {
                 "title": record.title,
@@ -331,7 +465,8 @@ def download_transcript(job_id: str, timestamps: bool = True):
 
 
 @app.post("/api/transcribe/stream")
-async def transcribe_stream(req: TranscribeRequest):
+async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require_user)):
+    user_id = user.id
     q: stdlib_queue.Queue = stdlib_queue.Queue()
 
     def worker():
@@ -418,6 +553,7 @@ async def transcribe_stream(req: TranscribeRequest):
                 model=req.model,
                 text=full_text,
                 segments=segments,
+                user_id=user_id,
             )
 
             q.put({

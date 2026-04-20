@@ -4,3 +4,5 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 zhconv
+python-jose[cryptography]
+bcrypt

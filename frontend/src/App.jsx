@@ -6,7 +6,61 @@ function formatDate(iso) {
   return d.toLocaleString()
 }
 
+function getToken() {
+  return localStorage.getItem('token')
+}
+
+function authHeaders() {
+  const token = getToken()
+  return token ? { 'Authorization': `Bearer ${token}` } : {}
+}
+
 function App() {
+  // --- Auth state ---
+  const [token, setToken] = useState(() => localStorage.getItem('token'))
+  const [username, setUsername] = useState(() => localStorage.getItem('username') || '')
+  const [authMode, setAuthMode] = useState('login') // 'login' | 'register'
+  const [authUser, setAuthUser] = useState('')
+  const [authPass, setAuthPass] = useState('')
+  const [authError, setAuthError] = useState('')
+  const [authLoading, setAuthLoading] = useState(false)
+
+  const handleAuth = async (e) => {
+    e.preventDefault()
+    setAuthError('')
+    setAuthLoading(true)
+    try {
+      const endpoint = authMode === 'register' ? '/api/register' : '/api/login'
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: authUser, password: authPass }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || 'Auth failed')
+      localStorage.setItem('token', data.access_token)
+      localStorage.setItem('username', data.username)
+      setToken(data.access_token)
+      setUsername(data.username)
+      setAuthUser('')
+      setAuthPass('')
+    } catch (err) {
+      setAuthError(err.message)
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('token')
+    localStorage.removeItem('username')
+    setToken(null)
+    setUsername('')
+    setHistory([])
+    setResult(null)
+  }
+
+  // --- App state ---
   const [platform, setPlatform] = useState('youtube')
   const [url, setUrl] = useState('')
   const [model, setModel] = useState('base')
@@ -32,12 +86,14 @@ function App() {
   const logContainerRef = useRef(null)
 
   const fetchHistory = useCallback(async () => {
+    if (!getToken()) { setHistoryLoading(false); return }
     try {
-      const res = await fetch('/api/history')
+      const res = await fetch('/api/history', { headers: authHeaders() })
       if (res.ok) setHistory(await res.json())
+      else if (res.status === 401) handleLogout()
     } catch {}
     finally { setHistoryLoading(false) }
-  }, [])
+  }, [token])
 
   useEffect(() => { fetchHistory() }, [fetchHistory])
 
@@ -75,7 +131,7 @@ function App() {
 
       const response = await fetch('/api/transcribe/stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify(body),
       })
 
@@ -121,12 +177,14 @@ function App() {
 
   const handleDownload = (jobId, withTimestamps) => {
     const ts = withTimestamps ? 'true' : 'false'
-    window.open(`/api/download/${jobId}?timestamps=${ts}`, '_blank')
+    const t = getToken()
+    const authParam = t ? `&token=${encodeURIComponent(t)}` : ''
+    window.open(`/api/download/${jobId}?timestamps=${ts}${authParam}`, '_blank')
   }
 
   const handleDelete = async (jobId) => {
     if (!window.confirm('Delete this transcript record?')) return
-    await fetch(`/api/history/${jobId}`, { method: 'DELETE' })
+    await fetch(`/api/history/${jobId}`, { method: 'DELETE', headers: authHeaders() })
     fetchHistory()
     if (result?.job_id === jobId) setResult(null)
   }
@@ -138,6 +196,28 @@ function App() {
   return (
     <div className="app">
       <h1>Video Transcript Generator</h1>
+
+      {/* Auth: Login / Register */}
+      {!token ? (
+        <div className="auth-section">
+          <div className="auth-toggle">
+            <button className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthError('') }}>Login</button>
+            <button className={authMode === 'register' ? 'active' : ''} onClick={() => { setAuthMode('register'); setAuthError('') }}>Register</button>
+          </div>
+          <form className="auth-form" onSubmit={handleAuth}>
+            <input type="text" placeholder="Username" value={authUser} onChange={e => setAuthUser(e.target.value)} required autoComplete="username" />
+            <input type="password" placeholder="Password" value={authPass} onChange={e => setAuthPass(e.target.value)} required autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} />
+            {authError && <p className="auth-error">{authError}</p>}
+            <button type="submit" disabled={authLoading}>{authLoading ? 'Please wait...' : authMode === 'register' ? 'Create Account' : 'Sign In'}</button>
+          </form>
+        </div>
+      ) : (
+      <>
+      {/* User bar */}
+      <div className="user-bar">
+        <span>Logged in as <strong>{username}</strong></span>
+        <button className="btn-outline btn-sm" onClick={handleLogout}>Logout</button>
+      </div>
 
       {/* Input Section */}
       <div className="input-section">
@@ -271,6 +351,8 @@ function App() {
           </ul>
         )}
       </div>
+      </>
+      )}
     </div>
   )
 }
