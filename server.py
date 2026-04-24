@@ -10,7 +10,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -567,6 +567,123 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
 
         except Exception as e:
             q.put({"type": "error", "message": str(e)})
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+
+    async def generate():
+        while True:
+            try:
+                event = q.get_nowait()
+                yield f"data: {json.dumps(event)}\n\n"
+                if event["type"] in ("done", "error"):
+                    break
+            except stdlib_queue.Empty:
+                await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/transcribe/upload")
+async def transcribe_upload(
+    file: UploadFile = File(...),
+    model: str = Form("base"),
+    language: str = Form(""),
+    user: User = Depends(require_user),
+):
+    user_id = user.id
+    q: stdlib_queue.Queue = stdlib_queue.Queue()
+
+    # Save uploaded file to a temp location
+    suffix = os.path.splitext(file.filename or "")[1] or ".mp4"
+    tmp_upload = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        content = await file.read()
+        tmp_upload.write(content)
+        tmp_upload.close()
+    except Exception as e:
+        tmp_upload.close()
+        os.unlink(tmp_upload.name)
+        raise HTTPException(status_code=400, detail=f"Failed to read uploaded file: {e}")
+
+    upload_path = tmp_upload.name
+    video_title = sanitize_filename(os.path.splitext(file.filename or "upload")[0])
+
+    def worker():
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                q.put({"type": "status", "message": f"Uploaded: {file.filename}"})
+
+                # Convert to mp3 via ffmpeg
+                audio_path = os.path.join(tmp_dir, "audio.mp3")
+                ffmpeg_bin = shutil.which("ffmpeg") or (os.path.join(FFMPEG_LOCATION, "ffmpeg") if FFMPEG_LOCATION else "ffmpeg")
+                import subprocess
+                q.put({"type": "status", "message": "Converting to audio..."})
+                proc = subprocess.run(
+                    [ffmpeg_bin, "-i", upload_path, "-vn", "-acodec", "libmp3lame",
+                     "-q:a", "2", "-y", audio_path],
+                    capture_output=True, text=True,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(f"FFmpeg conversion failed: {proc.stderr[-500:] if proc.stderr else 'unknown error'}")
+
+                q.put({"type": "status", "message": f"Loading Whisper model '{model}'..."})
+                whisper_model = whisper.load_model(model)
+
+                q.put({"type": "status", "message": "Transcribing audio... (this may take several minutes)"})
+                options = {}
+                if language.strip():
+                    options["language"] = language.strip()
+                result = whisper_model.transcribe(audio_path, **options)
+
+            job_id = uuid.uuid4().hex[:12]
+            segments = merge_segments(result["segments"])
+            detected_lang = result.get("language", "unknown")
+            full_text = to_simplified(result["text"].strip(), detected_lang)
+            for seg in segments:
+                seg["text"] = to_simplified(seg["text"], detected_lang)
+
+            jobs[job_id] = {
+                "text": full_text,
+                "language": detected_lang,
+                "segments": segments,
+                "title": video_title,
+            }
+
+            save_to_db(
+                job_id=job_id,
+                title=video_title,
+                url=f"[upload] {file.filename}",
+                language=detected_lang,
+                model=model,
+                text=full_text,
+                segments=segments,
+                user_id=user_id,
+            )
+
+            q.put({
+                "type": "done",
+                "job_id": job_id,
+                "text": full_text,
+                "language": detected_lang,
+                "segments": segments,
+                "title": video_title,
+            })
+
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+        finally:
+            try:
+                os.unlink(upload_path)
+            except OSError:
+                pass
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()

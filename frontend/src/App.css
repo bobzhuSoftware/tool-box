@@ -12,6 +12,41 @@
 }
 
 /* --- Platform Toggle --- */
+.input-mode-toggle {
+  display: flex;
+  gap: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid #646cff;
+  margin-bottom: 0.25rem;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 0.5rem 1rem;
+  border: none;
+  background: transparent;
+  color: #646cff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-btn:hover:not(:disabled) {
+  background: #f0f0ff;
+}
+
+.mode-btn.active {
+  background: #646cff;
+  color: #fff;
+}
+
+.mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .platform-toggle {
   display: flex;
   gap: 0.5rem;
@@ -96,6 +131,96 @@
 .url-row button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* --- Upload Area --- */
+.upload-area {
+  border: 2px dashed #d0d0d0;
+  border-radius: 10px;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: #fafafa;
+}
+
+.upload-area:hover {
+  border-color: #646cff;
+  background: #f5f5ff;
+}
+
+.upload-area.has-file {
+  border-color: #646cff;
+  border-style: solid;
+  background: #f0f0ff;
+}
+
+.upload-placeholder {
+  color: #888;
+}
+
+.upload-icon {
+  font-size: 2rem;
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.upload-placeholder p {
+  margin: 0.25rem 0;
+  font-size: 0.9rem;
+}
+
+.upload-hint {
+  font-size: 0.78rem !important;
+  color: #aaa;
+}
+
+.upload-file-info {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.upload-file-icon {
+  font-size: 1.3rem;
+}
+
+.upload-file-name {
+  font-weight: 600;
+  color: #1a1a2e;
+  font-size: 0.9rem;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-file-size {
+  color: #888;
+  font-size: 0.82rem;
+}
+
+.upload-remove-btn {
+  background: transparent;
+  border: 1.5px solid #c62828;
+  color: #c62828;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  padding: 0;
+  line-height: 1;
+}
+
+.upload-remove-btn:hover {
+  background: #fdecea;
 }
 
 /* Options row */

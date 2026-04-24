@@ -61,8 +61,11 @@ function App() {
   }
 
   // --- App state ---
+  const [inputMode, setInputMode] = useState('url') // 'url' | 'upload'
   const [platform, setPlatform] = useState('youtube')
   const [url, setUrl] = useState('')
+  const [uploadFile, setUploadFile] = useState(null)
+  const fileInputRef = useRef(null)
   const [model, setModel] = useState('base')
   const [language, setLanguage] = useState('')
 
@@ -120,20 +123,36 @@ function App() {
   }
 
   const handleTranscribe = async () => {
-    if (!url.trim()) return
+    if (inputMode === 'url' && !url.trim()) return
+    if (inputMode === 'upload' && !uploadFile) return
     setLoading(true)
     setProgressLog([])
     setResult(null)
 
     try {
-      const body = { url: url.trim(), model }
-      if (language.trim()) body.language = language.trim()
+      let response
 
-      const response = await fetch('/api/transcribe/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(body),
-      })
+      if (inputMode === 'upload') {
+        const formData = new FormData()
+        formData.append('file', uploadFile)
+        formData.append('model', model)
+        formData.append('language', language.trim())
+
+        response = await fetch('/api/transcribe/upload', {
+          method: 'POST',
+          headers: { ...authHeaders() },
+          body: formData,
+        })
+      } else {
+        const body = { url: url.trim(), model }
+        if (language.trim()) body.language = language.trim()
+
+        response = await fetch('/api/transcribe/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(body),
+        })
+      }
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
@@ -221,33 +240,109 @@ function App() {
 
       {/* Input Section */}
       <div className="input-section">
-        {/* Platform Toggle */}
-        <div className="platform-toggle">
-          {Object.entries(PLATFORMS).map(([key, p]) => (
-            <button
-              key={key}
-              className={`platform-btn ${platform === key ? 'active' : ''}`}
-              onClick={() => { setPlatform(key); setUrl('') }}
-              disabled={loading}
-            >
-              {p.icon} {p.label}
-            </button>
-          ))}
-        </div>
-
-        <div className="url-row">
-          <input
-            type="text"
-            placeholder={PLATFORMS[platform].placeholder}
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={handleKeyDown}
+        {/* Input Mode Toggle: URL vs Upload */}
+        <div className="input-mode-toggle">
+          <button
+            className={`mode-btn ${inputMode === 'url' ? 'active' : ''}`}
+            onClick={() => setInputMode('url')}
             disabled={loading}
-          />
-          <button onClick={handleTranscribe} disabled={loading || !url.trim()}>
-            {loading ? 'Transcribing...' : 'Transcribe'}
+          >
+            🔗 URL
+          </button>
+          <button
+            className={`mode-btn ${inputMode === 'upload' ? 'active' : ''}`}
+            onClick={() => setInputMode('upload')}
+            disabled={loading}
+          >
+            📁 Upload File
           </button>
         </div>
+
+        {inputMode === 'url' ? (
+          <>
+            {/* Platform Toggle */}
+            <div className="platform-toggle">
+              {Object.entries(PLATFORMS).map(([key, p]) => (
+                <button
+                  key={key}
+                  className={`platform-btn ${platform === key ? 'active' : ''}`}
+                  onClick={() => { setPlatform(key); setUrl('') }}
+                  disabled={loading}
+                >
+                  {p.icon} {p.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="url-row">
+              <input
+                type="text"
+                placeholder={PLATFORMS[platform].placeholder}
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={loading}
+              />
+              <button onClick={handleTranscribe} disabled={loading || !url.trim()}>
+                {loading ? 'Transcribing...' : 'Transcribe'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div
+              className={`upload-area ${uploadFile ? 'has-file' : ''}`}
+              onClick={() => !loading && fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+              onDrop={(e) => {
+                e.preventDefault(); e.stopPropagation()
+                const f = e.dataTransfer.files[0]
+                if (f) setUploadFile(f)
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/*,audio/*"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files[0]
+                  if (f) setUploadFile(f)
+                }}
+                disabled={loading}
+              />
+              {uploadFile ? (
+                <div className="upload-file-info">
+                  <span className="upload-file-icon">🎬</span>
+                  <span className="upload-file-name">{uploadFile.name}</span>
+                  <span className="upload-file-size">({(uploadFile.size / 1024 / 1024).toFixed(1)} MB)</span>
+                  <button
+                    className="upload-remove-btn"
+                    onClick={(e) => { e.stopPropagation(); setUploadFile(null); if (fileInputRef.current) fileInputRef.current.value = '' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <div className="upload-placeholder">
+                  <span className="upload-icon">📤</span>
+                  <p>Click or drag & drop a video/audio file here</p>
+                  <p className="upload-hint">Supports MP4, MKV, AVI, MP3, WAV, etc.</p>
+                </div>
+              )}
+            </div>
+
+            <div className="url-row">
+              <button
+                onClick={handleTranscribe}
+                disabled={loading || !uploadFile}
+                style={{ width: '100%' }}
+              >
+                {loading ? 'Transcribing...' : 'Transcribe Uploaded File'}
+              </button>
+            </div>
+          </>
+        )}
         <div className="options-row">
           <label>
             Model
