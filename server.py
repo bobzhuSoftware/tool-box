@@ -9,6 +9,7 @@ import threading
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -181,6 +182,7 @@ app = FastAPI()
 
 # In-memory cache so downloads within the same session are fast
 jobs: dict[str, dict] = {}
+pdf_jobs: dict[str, dict] = {}  # { job_id: { "bytes": bytes, "url": str, "user_id": str } }
 
 
 class RegisterRequest(BaseModel):
@@ -705,6 +707,123 @@ async def transcribe_upload(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Web → PDF endpoint
+# ---------------------------------------------------------------------------
+_URL_PATTERN = re.compile(r'^https?://', re.IGNORECASE)
+
+
+class PdfRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/pdf/stream")
+async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
+    url = req.url.strip()
+    if not _URL_PATTERN.match(url):
+        raise HTTPException(status_code=400, detail="Only http:// and https:// URLs are supported")
+
+    q: stdlib_queue.Queue = stdlib_queue.Queue()
+
+    def run_worker():
+        import subprocess
+        import sys as _sys
+
+        worker = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.close()
+
+        try:
+            proc = subprocess.Popen(
+                [_sys.executable, worker, url, tmp.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if line.startswith("STATUS:"):
+                    q.put({"type": "status", "message": line[7:]})
+                elif line == "DONE":
+                    q.put({"type": "_done_marker", "path": tmp.name})
+            proc.wait()
+            if proc.returncode != 0:
+                stderr_out = proc.stderr.read()[-400:]
+                q.put({"type": "error", "message": f"PDF generation failed: {stderr_out}"})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+
+    thread = threading.Thread(target=run_worker, daemon=True)
+    thread.start()
+
+    async def generate():
+        job_id = uuid.uuid4().hex[:12]
+        while True:
+            try:
+                event = q.get_nowait()
+            except stdlib_queue.Empty:
+                await asyncio.sleep(0.15)
+                continue
+
+            if event["type"] == "_done_marker":
+                pdf_path = event["path"]
+                try:
+                    with open(pdf_path, "rb") as f:
+                        pdf_bytes = f.read()
+                    os.unlink(pdf_path)
+                except OSError:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to read generated PDF'})}\n\n"
+                    break
+                pdf_jobs[job_id] = {"bytes": pdf_bytes, "url": url, "user_id": user.id}
+                yield f"data: {json.dumps({'type': 'done', 'job_id': job_id})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+                if event["type"] == "error":
+                    break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/pdf/download/{job_id}")
+def download_pdf(
+    job_id: str,
+    token: str | None = None,
+    user: User | None = Depends(get_current_user),
+):
+    # Support token as query param (for window.open downloads)
+    if user is None and token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid = payload.get("sub")
+            if uid:
+                with Session(engine) as s:
+                    user = s.get(User, uid)
+        except JWTError:
+            pass
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    job = pdf_jobs.get(job_id)
+    if not job or job.get("user_id") != user.id:
+        raise HTTPException(status_code=404, detail="PDF not found or expired")
+
+    parsed = urlparse(job["url"])
+    safe_host = re.sub(r"[^a-zA-Z0-9._-]", "_", parsed.hostname or "page")
+    filename = f"{safe_host}.pdf"
+
+    import io
+    return StreamingResponse(
+        io.BytesIO(job["bytes"]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

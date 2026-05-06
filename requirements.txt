@@ -7,3 +7,4 @@ zhconv
 python-jose[cryptography]
 bcrypt
 python-multipart
+playwright

@@ -4,11 +4,171 @@
   gap: 2rem;
 }
 
-.app h1 {
-  font-size: 1.8rem;
-  font-weight: 700;
-  text-align: center;
+/* --- App Header --- */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #e8e8f0;
+  margin-bottom: 0.5rem;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.app-title {
+  font-size: 1.5rem;
+  font-weight: 800;
   color: #1a1a2e;
+  letter-spacing: -0.5px;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.app-title:hover {
+  color: #646cff;
+}
+
+.back-btn {
+  padding: 0.35rem 0.8rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 20px;
+  background: transparent;
+  color: #555;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.back-btn:hover {
+  border-color: #646cff;
+  color: #646cff;
+}
+
+/* --- Auth Hero (login page) --- */
+.auth-hero {
+  text-align: center;
+  padding: 2rem 0 0.5rem;
+}
+
+.auth-hero h1 {
+  font-size: 2.2rem;
+  font-weight: 800;
+  color: #1a1a2e;
+  letter-spacing: -0.5px;
+  margin-bottom: 0.4rem;
+}
+
+.auth-hero p {
+  color: #888;
+  font-size: 0.95rem;
+}
+
+/* --- Tool page title --- */
+.tool-page-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  padding-top: 0.25rem;
+}
+
+/* --- Home Page --- */
+.home-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.home-intro p {
+  color: #777;
+  font-size: 0.95rem;
+}
+
+.tools-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.tool-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: #fff;
+  border: 1.5px solid #e8e8f0;
+  border-radius: 14px;
+  padding: 1.25rem 1.25rem 1.25rem 1.1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  outline: none;
+}
+
+.tool-card:hover,
+.tool-card:focus {
+  border-color: #646cff;
+  box-shadow: 0 4px 16px rgba(100, 108, 255, 0.12);
+  transform: translateY(-1px);
+}
+
+.tool-card-icon {
+  font-size: 2rem;
+  flex-shrink: 0;
+  width: 2.5rem;
+  text-align: center;
+}
+
+.tool-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-card-body h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 0.3rem;
+}
+
+.tool-card-body p {
+  font-size: 0.85rem;
+  color: #666;
+  line-height: 1.5;
+  margin-bottom: 0.5rem;
+}
+
+.tool-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tool-tag {
+  background: #eff0ff;
+  color: #646cff;
+  border-radius: 20px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.tool-card-arrow {
+  font-size: 1.1rem;
+  color: #c0c0d0;
+  flex-shrink: 0;
+  transition: transform 0.2s, color 0.2s;
+}
+
+.tool-card:hover .tool-card-arrow,
+.tool-card:focus .tool-card-arrow {
+  transform: translateX(3px);
+  color: #646cff;
 }
 
 /* --- Platform Toggle --- */
@@ -574,4 +734,63 @@
   gap: 0.75rem;
   font-size: 0.88rem;
   color: #555;
+}
+
+/* --- Tool description paragraph --- */
+.tool-description {
+  font-size: 0.88rem;
+  color: #666;
+  line-height: 1.5;
+}
+
+/* --- PDF result card --- */
+.pdf-result {
+  background: #fff;
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.pdf-result-info {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.pdf-result-icon {
+  font-size: 2rem;
+  flex-shrink: 0;
+}
+
+.pdf-result-title {
+  font-weight: 700;
+  font-size: 1rem;
+  color: #1a1a2e;
+  margin-bottom: 0.2rem;
+}
+
+.pdf-result-url {
+  font-size: 0.8rem;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+}
+
+.pdf-download-btn {
+  padding: 0.65rem 1.4rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 2px solid #646cff;
+  white-space: nowrap;
+  flex-shrink: 0;
 }

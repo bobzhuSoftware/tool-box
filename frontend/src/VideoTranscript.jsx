@@ -1,0 +1,372 @@
+import { useState, useRef, useEffect, useCallback } from 'react'
+
+function formatDate(iso) {
+  const d = new Date(iso)
+  return d.toLocaleString()
+}
+
+function VideoTranscript({ token, onAuthError }) {
+  const authHeaders = () =>
+    token ? { Authorization: `Bearer ${token}` } : {}
+
+  const [inputMode, setInputMode] = useState('url')
+  const [platform, setPlatform] = useState('youtube')
+  const [url, setUrl] = useState('')
+  const [uploadFile, setUploadFile] = useState(null)
+  const fileInputRef = useRef(null)
+  const [model, setModel] = useState('base')
+  const [language, setLanguage] = useState('')
+
+  const PLATFORMS = {
+    youtube: {
+      label: 'YouTube',
+      placeholder: 'e.g. https://www.youtube.com/watch?v=...',
+      icon: '▶',
+    },
+    bilibili: {
+      label: 'Bilibili',
+      placeholder: 'e.g. https://www.bilibili.com/video/BV...',
+      icon: '📺',
+    },
+  }
+
+  const [loading, setLoading] = useState(false)
+  const [progressLog, setProgressLog] = useState([])
+  const [result, setResult] = useState(null)
+  const [history, setHistory] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(true)
+  const logContainerRef = useRef(null)
+
+  const fetchHistory = useCallback(async () => {
+    if (!token) { setHistoryLoading(false); return }
+    try {
+      const res = await fetch('/api/history', { headers: authHeaders() })
+      if (res.ok) setHistory(await res.json())
+      else if (res.status === 401) onAuthError()
+    } catch {}
+    finally { setHistoryLoading(false) }
+  }, [token])
+
+  useEffect(() => { fetchHistory() }, [fetchHistory])
+
+  useEffect(() => {
+    const el = logContainerRef.current
+    if (!el) return
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    if (isNearBottom) el.scrollTop = el.scrollHeight
+  }, [progressLog])
+
+  const addLog = (entry) => {
+    if (entry.type === 'progress') {
+      setProgressLog(prev => {
+        const last = prev[prev.length - 1]
+        if (last?.type === 'progress') return [...prev.slice(0, -1), entry]
+        return [...prev, entry]
+      })
+    } else {
+      setProgressLog(prev => [...prev, entry])
+    }
+  }
+
+  const handleTranscribe = async () => {
+    if (inputMode === 'url' && !url.trim()) return
+    if (inputMode === 'upload' && !uploadFile) return
+    setLoading(true)
+    setProgressLog([])
+    setResult(null)
+
+    try {
+      let response
+
+      if (inputMode === 'upload') {
+        const formData = new FormData()
+        formData.append('file', uploadFile)
+        formData.append('model', model)
+        formData.append('language', language.trim())
+        response = await fetch('/api/transcribe/upload', {
+          method: 'POST',
+          headers: { ...authHeaders() },
+          body: formData,
+        })
+      } else {
+        const body = { url: url.trim(), model }
+        if (language.trim()) body.language = language.trim()
+        response = await fetch('/api/transcribe/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify(body),
+        })
+      }
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || `Server error (${response.status})`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
+
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6))
+                if (event.type === 'done') {
+                  setResult(event)
+                  addLog({ type: 'done', message: `Transcription complete! Detected language: ${event.language}` })
+                  fetchHistory()
+                } else {
+                  addLog(event)
+                }
+              } catch { /* ignore malformed SSE lines */ }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      addLog({ type: 'error', message: err.message || 'Something went wrong' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDownload = (jobId, withTimestamps) => {
+    const ts = withTimestamps ? 'true' : 'false'
+    const authParam = token ? `&token=${encodeURIComponent(token)}` : ''
+    window.open(`/api/download/${jobId}?timestamps=${ts}${authParam}`, '_blank')
+  }
+
+  const handleDelete = async (jobId) => {
+    if (!window.confirm('Delete this transcript record?')) return
+    await fetch(`/api/history/${jobId}`, { method: 'DELETE', headers: authHeaders() })
+    fetchHistory()
+    if (result?.job_id === jobId) setResult(null)
+  }
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !loading) handleTranscribe()
+  }
+
+  return (
+    <>
+      <h2 className="tool-page-title">🎬 Video Transcript Generator</h2>
+
+      {/* Input Section */}
+      <div className="input-section">
+        {/* Input Mode Toggle: URL vs Upload */}
+        <div className="input-mode-toggle">
+          <button
+            className={`mode-btn ${inputMode === 'url' ? 'active' : ''}`}
+            onClick={() => setInputMode('url')}
+            disabled={loading}
+          >
+            🔗 URL
+          </button>
+          <button
+            className={`mode-btn ${inputMode === 'upload' ? 'active' : ''}`}
+            onClick={() => setInputMode('upload')}
+            disabled={loading}
+          >
+            📁 Upload File
+          </button>
+        </div>
+
+        {inputMode === 'url' ? (
+          <>
+            <div className="platform-toggle">
+              {Object.entries(PLATFORMS).map(([key, p]) => (
+                <button
+                  key={key}
+                  className={`platform-btn ${platform === key ? 'active' : ''}`}
+                  onClick={() => { setPlatform(key); setUrl('') }}
+                  disabled={loading}
+                >
+                  {p.icon} {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="url-row">
+              <input
+                type="text"
+                placeholder={PLATFORMS[platform].placeholder}
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={loading}
+              />
+              <button onClick={handleTranscribe} disabled={loading || !url.trim()}>
+                {loading ? 'Transcribing...' : 'Transcribe'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div
+              className={`upload-area ${uploadFile ? 'has-file' : ''}`}
+              onClick={() => !loading && fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+              onDrop={(e) => {
+                e.preventDefault(); e.stopPropagation()
+                const f = e.dataTransfer.files[0]
+                if (f) setUploadFile(f)
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="video/*,audio/*"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files[0]
+                  if (f) setUploadFile(f)
+                }}
+                disabled={loading}
+              />
+              {uploadFile ? (
+                <div className="upload-file-info">
+                  <span className="upload-file-icon">🎬</span>
+                  <span className="upload-file-name">{uploadFile.name}</span>
+                  <span className="upload-file-size">({(uploadFile.size / 1024 / 1024).toFixed(1)} MB)</span>
+                  <button
+                    className="upload-remove-btn"
+                    onClick={(e) => { e.stopPropagation(); setUploadFile(null); if (fileInputRef.current) fileInputRef.current.value = '' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <div className="upload-placeholder">
+                  <span className="upload-icon">📤</span>
+                  <p>Click or drag & drop a video/audio file here</p>
+                  <p className="upload-hint">Supports MP4, MKV, AVI, MP3, WAV, etc.</p>
+                </div>
+              )}
+            </div>
+            <div className="url-row">
+              <button
+                onClick={handleTranscribe}
+                disabled={loading || !uploadFile}
+                style={{ width: '100%' }}
+              >
+                {loading ? 'Transcribing...' : 'Transcribe Uploaded File'}
+              </button>
+            </div>
+          </>
+        )}
+
+        <div className="options-row">
+          <label>
+            Model
+            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loading}>
+              <option value="tiny">tiny (fastest)</option>
+              <option value="base">base (default)</option>
+              <option value="small">small</option>
+              <option value="medium">medium</option>
+              <option value="large">large (best)</option>
+            </select>
+          </label>
+          <label>
+            Language (optional)
+            <input
+              type="text"
+              placeholder="e.g. en, zh, de"
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              disabled={loading}
+              style={{ width: '120px' }}
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Progress Log */}
+      {progressLog.length > 0 && (
+        <div className="progress-section">
+          <div className="progress-log" ref={logContainerRef}>
+            {progressLog.map((entry, i) => (
+              <div key={i} className={`log-entry log-${entry.type}`}>
+                <span className="log-icon">
+                  {entry.type === 'done' ? '✓' :
+                   entry.type === 'error' ? '✕' :
+                   entry.type === 'progress' ? '↓' : '●'}
+                </span>
+                <span className="log-message">{entry.message}</span>
+              </div>
+            ))}
+            {loading && <div className="log-entry log-status"><span className="spinner" />Waiting...</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Result */}
+      {result && (
+        <div className="result-section">
+          <div className="result-header">
+            <h2>Transcript</h2>
+            <span className="lang-badge">Language: {result.language}</span>
+          </div>
+          <div className="transcript-box">
+            {result.segments.map((seg, i) => (
+              <div className="segment" key={i}>
+                <div className="time">[{seg.start} → {seg.end}]</div>
+                <p className="segment-text">{seg.text}</p>
+              </div>
+            ))}
+          </div>
+          <div className="download-row">
+            <button className="btn-primary" onClick={() => handleDownload(result.job_id, true)}>
+              Download with timestamps
+            </button>
+            <button className="btn-outline" onClick={() => handleDownload(result.job_id, false)}>
+              Download plain text
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* History */}
+      <div className="history-section">
+        <h2>Recent Transcripts</h2>
+        {historyLoading ? (
+          <p className="history-empty">Loading...</p>
+        ) : history.length === 0 ? (
+          <p className="history-empty">No transcripts yet. Paste a video URL above to get started.</p>
+        ) : (
+          <ul className="history-list">
+            {history.map((item) => (
+              <li key={item.job_id} className="history-item">
+                <div className="history-info">
+                  <span className="history-title">{item.title}</span>
+                  <span className="history-meta">
+                    {item.language} · {item.model} · {formatDate(item.created_at)}
+                  </span>
+                </div>
+                <div className="history-actions">
+                  <button className="btn-sm btn-primary" onClick={() => handleDownload(item.job_id, true)}>
+                    ↓ Timestamps
+                  </button>
+                  <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, false)}>
+                    ↓ Plain
+                  </button>
+                  <button className="btn-sm btn-danger" onClick={() => handleDelete(item.job_id)}>
+                    ✕
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  )
+}
+
+export default VideoTranscript

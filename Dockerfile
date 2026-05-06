@@ -27,8 +27,11 @@ RUN pip install --no-cache-dir \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright's Chromium browser (needed for web-to-PDF tool)
+RUN playwright install --with-deps chromium
+
 # Copy backend source
-COPY server.py transcribe.py ./
+COPY server.py transcribe.py pdf_worker.py ./
 
 # Copy compiled frontend from Stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
