@@ -182,7 +182,51 @@ app = FastAPI()
 
 # In-memory cache so downloads within the same session are fast
 jobs: dict[str, dict] = {}
-pdf_jobs: dict[str, dict] = {}  # { job_id: { "bytes": bytes, "url": str, "user_id": str } }
+
+# ---------------------------------------------------------------------------
+# Disk-based PDF job cache (survives hot-reloads in dev mode)
+# ---------------------------------------------------------------------------
+_PDF_CACHE_DIR = os.path.join(tempfile.gettempdir(), "vt_pdf_cache")
+os.makedirs(_PDF_CACHE_DIR, exist_ok=True)
+
+
+def _pdf_file_path(job_id: str) -> str:
+    return os.path.join(_PDF_CACHE_DIR, f"{job_id}.pdf")
+
+
+def _pdf_meta_path(job_id: str) -> str:
+    return os.path.join(_PDF_CACHE_DIR, f"{job_id}.json")
+
+
+def _save_pdf_job(job_id: str, src_path: str, user_id: str, url: str) -> None:
+    shutil.move(src_path, _pdf_file_path(job_id))
+    with open(_pdf_meta_path(job_id), "w", encoding="utf-8") as f:
+        json.dump({"user_id": user_id, "url": url}, f)
+
+
+def _get_pdf_job(job_id: str, user_id: str) -> str | None:
+    """Return PDF path if job exists and belongs to user, else None."""
+    meta = _pdf_meta_path(job_id)
+    pdf = _pdf_file_path(job_id)
+    if not os.path.isfile(meta) or not os.path.isfile(pdf):
+        return None
+    with open(meta, encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("user_id") != user_id:
+        return None
+    return pdf
+
+
+def _cleanup_old_pdfs(max_age_seconds: int = 3600) -> None:
+    """Delete PDF cache files older than max_age_seconds."""
+    now = datetime.now().timestamp()
+    for fname in os.listdir(_PDF_CACHE_DIR):
+        fpath = os.path.join(_PDF_CACHE_DIR, fname)
+        try:
+            if now - os.path.getmtime(fpath) > max_age_seconds:
+                os.unlink(fpath)
+        except OSError:
+            pass
 
 
 class RegisterRequest(BaseModel):
@@ -718,6 +762,7 @@ _URL_PATTERN = re.compile(r'^https?://', re.IGNORECASE)
 
 class PdfRequest(BaseModel):
     url: str
+    is_x: bool = False  # True = use Firefox profile path for X/Twitter articles
 
 
 @app.post("/api/pdf/stream")
@@ -733,6 +778,123 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
         import sys as _sys
 
         worker = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
+        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+        tmp.close()
+
+        try:
+            proc = subprocess.Popen(
+                [_sys.executable, worker, url, tmp.name, "1" if req.is_x else "0"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if line.startswith("STATUS:"):
+                    q.put({"type": "status", "message": line[7:]})
+                elif line == "DONE":
+                    q.put({"type": "_done_marker", "path": tmp.name})
+            proc.wait()
+            if proc.returncode != 0:
+                stderr_out = proc.stderr.read()[-400:]
+                q.put({"type": "error", "message": f"PDF generation failed: {stderr_out}"})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+
+    thread = threading.Thread(target=run_worker, daemon=True)
+    thread.start()
+
+    async def generate():
+        job_id = uuid.uuid4().hex[:12]
+        while True:
+            try:
+                event = q.get_nowait()
+            except stdlib_queue.Empty:
+                await asyncio.sleep(0.15)
+                continue
+
+            if event["type"] == "_done_marker":
+                pdf_path = event["path"]
+                try:
+                    _save_pdf_job(job_id, pdf_path, user.id, url)
+                except OSError as exc:
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save PDF: {exc}'})}\n\n"
+                    break
+                yield f"data: {json.dumps({'type': 'done', 'job_id': job_id})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+                if event["type"] == "error":
+                    break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/pdf/download/{job_id}")
+def download_pdf(
+    job_id: str,
+    token: str | None = None,
+    user: User | None = Depends(get_current_user),
+):
+    # Support token as query param (for window.open downloads)
+    if user is None and token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid = payload.get("sub")
+            if uid:
+                with Session(engine) as s:
+                    user = s.get(User, uid)
+        except JWTError:
+            pass
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    _cleanup_old_pdfs()
+    pdf_file = _get_pdf_job(job_id, user.id)
+    if not pdf_file:
+        raise HTTPException(status_code=404, detail="PDF not found or expired")
+
+    # Read metadata for filename
+    try:
+        with open(_pdf_meta_path(job_id), encoding="utf-8") as f:
+            meta = json.load(f)
+        parsed = urlparse(meta.get("url", ""))
+        safe_host = re.sub(r"[^a-zA-Z0-9._-]", "_", parsed.hostname or "page")
+    except (OSError, ValueError):
+        safe_host = "download"
+    filename = f"{safe_host}.pdf"
+
+    return FileResponse(
+        pdf_file,
+        media_type="application/pdf",
+        filename=filename,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PDF2: Readability-based clean article extraction
+# ---------------------------------------------------------------------------
+class Pdf2Request(BaseModel):
+    url: str
+
+
+@app.post("/api/pdf2/stream")
+async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
+    url = req.url.strip()
+    if not _URL_PATTERN.match(url):
+        raise HTTPException(status_code=400, detail="Only http:// and https:// URLs are supported")
+
+    q: stdlib_queue.Queue = stdlib_queue.Queue()
+
+    def run_worker():
+        import subprocess
+        import sys as _sys
+
+        worker = os.path.join(os.path.dirname(__file__), "pdf2_worker.py")
         tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         tmp.close()
 
@@ -771,13 +933,10 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
             if event["type"] == "_done_marker":
                 pdf_path = event["path"]
                 try:
-                    with open(pdf_path, "rb") as f:
-                        pdf_bytes = f.read()
-                    os.unlink(pdf_path)
-                except OSError:
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to read generated PDF'})}\n\n"
+                    _save_pdf_job(job_id, pdf_path, user.id, url)
+                except OSError as exc:
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save PDF: {exc}'})}\n\n"
                     break
-                pdf_jobs[job_id] = {"bytes": pdf_bytes, "url": url, "user_id": user.id}
                 yield f"data: {json.dumps({'type': 'done', 'job_id': job_id})}\n\n"
                 break
             else:
@@ -789,41 +948,6 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.get("/api/pdf/download/{job_id}")
-def download_pdf(
-    job_id: str,
-    token: str | None = None,
-    user: User | None = Depends(get_current_user),
-):
-    # Support token as query param (for window.open downloads)
-    if user is None and token:
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            uid = payload.get("sub")
-            if uid:
-                with Session(engine) as s:
-                    user = s.get(User, uid)
-        except JWTError:
-            pass
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    job = pdf_jobs.get(job_id)
-    if not job or job.get("user_id") != user.id:
-        raise HTTPException(status_code=404, detail="PDF not found or expired")
-
-    parsed = urlparse(job["url"])
-    safe_host = re.sub(r"[^a-zA-Z0-9._-]", "_", parsed.hostname or "page")
-    filename = f"{safe_host}.pdf"
-
-    import io
-    return StreamingResponse(
-        io.BytesIO(job["bytes"]),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

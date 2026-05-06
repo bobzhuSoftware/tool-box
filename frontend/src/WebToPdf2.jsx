@@ -1,11 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 
-function WebToPdf({ token, onAuthError }) {
+function WebToPdf2({ token, onAuthError }) {
   const [url, setUrl] = useState('')
-  const [isX, setIsX] = useState(false)
   const [loading, setLoading] = useState(false)
   const [progressLog, setProgressLog] = useState([])
-  const [result, setResult] = useState(null) // { job_id }
+  const [result, setResult] = useState(null)
   const logContainerRef = useRef(null)
 
   useEffect(() => {
@@ -23,13 +22,13 @@ function WebToPdf({ token, onAuthError }) {
     setResult(null)
 
     try {
-      const res = await fetch('/api/pdf/stream', {
+      const res = await fetch('/api/pdf2/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ url: url.trim(), is_x: isX }),
+        body: JSON.stringify({ url: url.trim() }),
       })
 
       if (!res.ok) {
@@ -56,7 +55,6 @@ function WebToPdf({ token, onAuthError }) {
                 if (event.type === 'done') {
                   setResult({ job_id: event.job_id })
                   addLog({ type: 'done', message: 'PDF generated! Downloading...' })
-                  // Auto-trigger download immediately — avoids server-reload race
                   const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
                   window.open(`/api/pdf/download/${event.job_id}${authParam}`, '_blank')
                 } else if (event.type === 'error') {
@@ -83,34 +81,25 @@ function WebToPdf({ token, onAuthError }) {
 
   return (
     <>
-      <h2 className="tool-page-title">🌐 Web Page to PDF</h2>
+      <h2 className="tool-page-title">📰 Article to PDF</h2>
 
       <div className="input-section">
         <p className="tool-description">
-          Enter any webpage URL to render it as a PDF file.
+          Extracts only the article text and images from any webpage — removes ads, nav bars, and clutter — and saves as a clean, readable PDF.
         </p>
         <div className="url-row">
           <input
             type="text"
-            placeholder="https://example.com"
+            placeholder="https://example.com/article"
             value={url}
             onChange={(e) => { setUrl(e.target.value); setResult(null) }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !loading) handleGenerate() }}
             disabled={loading}
           />
           <button onClick={handleGenerate} disabled={loading || !url.trim()}>
-            {loading ? 'Generating...' : 'Generate PDF'}
+            {loading ? 'Extracting...' : 'Extract & PDF'}
           </button>
         </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', fontSize: '14px', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={isX}
-            onChange={(e) => setIsX(e.target.checked)}
-            disabled={loading}
-          />
-          X / Twitter article (uses Firefox login session)
-        </label>
       </div>
 
       {progressLog.length > 0 && (
@@ -152,4 +141,4 @@ function WebToPdf({ token, onAuthError }) {
   )
 }
 
-export default WebToPdf
+export default WebToPdf2

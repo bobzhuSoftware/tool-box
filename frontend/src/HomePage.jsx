@@ -16,6 +16,14 @@ function HomePage({ onSelectTool }) {
         'Enter any webpage URL and download a fully-rendered PDF to your device in seconds.',
       tags: ['PDF', 'Web', 'Download'],
     },
+    {
+      id: 'webtopdf2',
+      icon: '📰',
+      title: 'Article to PDF',
+      description:
+        'Extracts only the article text and images — removes ads, nav bars, and clutter — and saves as a clean readable PDF.',
+      tags: ['PDF', 'Article', 'Readability'],
+    },
   ]
 
   return (
