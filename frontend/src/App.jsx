@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import './App.css'
 import HomePage from './HomePage'
 import VideoTranscript from './VideoTranscript'
@@ -9,6 +9,7 @@ function App() {
   // --- Auth state ---
   const [token, setToken] = useState(() => localStorage.getItem('token'))
   const [username, setUsername] = useState(() => localStorage.getItem('username') || '')
+  const [authChecked, setAuthChecked] = useState(false)
   const [authMode, setAuthMode] = useState('login') // 'login' | 'register'
   const [authUser, setAuthUser] = useState('')
   const [authPass, setAuthPass] = useState('')
@@ -17,6 +18,25 @@ function App() {
 
   // --- Navigation state ---
   const [currentTool, setCurrentTool] = useState(null) // null = home page
+
+  // Validate stored token on startup
+  useEffect(() => {
+    if (!token) {
+      setAuthChecked(true)
+      return
+    }
+    fetch('/api/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then((res) => {
+        if (!res.ok) throw new Error('invalid')
+      })
+      .catch(() => {
+        localStorage.removeItem('token')
+        localStorage.removeItem('username')
+        setToken(null)
+        setUsername('')
+      })
+      .finally(() => setAuthChecked(true))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAuth = async (e) => {
     e.preventDefault()
@@ -50,6 +70,11 @@ function App() {
     setToken(null)
     setUsername('')
     setCurrentTool(null)
+  }
+
+  // --- Render: verifying token ---
+  if (!authChecked) {
+    return <div className="app" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>Loading...</div>
   }
 
   // --- Render: not logged in ---
