@@ -198,10 +198,10 @@ def _pdf_meta_path(job_id: str) -> str:
     return os.path.join(_PDF_CACHE_DIR, f"{job_id}.json")
 
 
-def _save_pdf_job(job_id: str, src_path: str, user_id: str, url: str) -> None:
+def _save_pdf_job(job_id: str, src_path: str, user_id: str, url: str, title: str = "") -> None:
     shutil.move(src_path, _pdf_file_path(job_id))
     with open(_pdf_meta_path(job_id), "w", encoding="utf-8") as f:
-        json.dump({"user_id": user_id, "url": url}, f)
+        json.dump({"user_id": user_id, "url": url, "title": title}, f)
 
 
 def _get_pdf_job(job_id: str, user_id: str) -> str | None:
@@ -788,12 +788,15 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            captured_title = ""
             for raw_line in proc.stdout:
                 line = raw_line.strip()
                 if line.startswith("STATUS:"):
                     q.put({"type": "status", "message": line[7:]})
+                elif line.startswith("TITLE:"):
+                    captured_title = line[6:]
                 elif line == "DONE":
-                    q.put({"type": "_done_marker", "path": tmp.name})
+                    q.put({"type": "_done_marker", "path": tmp.name, "title": captured_title})
             proc.wait()
             if proc.returncode != 0:
                 stderr_out = proc.stderr.read()[-400:]
@@ -815,8 +818,9 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
 
             if event["type"] == "_done_marker":
                 pdf_path = event["path"]
+                article_title = event.get("title", "")
                 try:
-                    _save_pdf_job(job_id, pdf_path, user.id, url)
+                    _save_pdf_job(job_id, pdf_path, user.id, url, article_title)
                 except OSError as exc:
                     yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save PDF: {exc}'})}\n\n"
                     break
@@ -862,11 +866,20 @@ def download_pdf(
     try:
         with open(_pdf_meta_path(job_id), encoding="utf-8") as f:
             meta = json.load(f)
-        parsed = urlparse(meta.get("url", ""))
-        safe_host = re.sub(r"[^a-zA-Z0-9._-]", "_", parsed.hostname or "page")
+        raw_title = meta.get("title", "").strip()
+        if raw_title:
+            # Sanitize title for use as a filename
+            safe_name = unicodedata.normalize("NFC", raw_title)
+            safe_name = re.sub(r'[\\/:*?"<>|\r\n\t]', " ", safe_name)
+            safe_name = re.sub(r" +", " ", safe_name).strip()
+            safe_name = safe_name[:120]  # cap length
+            filename = f"{safe_name}.pdf"
+        else:
+            parsed = urlparse(meta.get("url", ""))
+            safe_host = re.sub(r"[^a-zA-Z0-9._-]", "_", parsed.hostname or "page")
+            filename = f"{safe_host}.pdf"
     except (OSError, ValueError):
-        safe_host = "download"
-    filename = f"{safe_host}.pdf"
+        filename = "download.pdf"
 
     return FileResponse(
         pdf_file,
@@ -959,7 +972,7 @@ os.makedirs(_VTT_CACHE_DIR, exist_ok=True)
 
 
 def _vtt_file_path(job_id: str) -> str:
-    return os.path.join(_VTT_CACHE_DIR, f"{job_id}.vtt")
+    return os.path.join(_VTT_CACHE_DIR, f"{job_id}.txt")
 
 
 def _vtt_meta_path(job_id: str) -> str:
@@ -983,7 +996,7 @@ async def teams_transcript_stream(req: TeamsTranscriptRequest, user: User = Depe
         import sys as _sys
 
         worker = os.path.join(os.path.dirname(__file__), "teams_transcript_worker.py")
-        tmp = tempfile.NamedTemporaryFile(suffix=".vtt", delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
         tmp.close()
 
         _env = os.environ.copy()
@@ -1092,9 +1105,9 @@ def download_vtt(
         raise HTTPException(status_code=404, detail="Transcript not found or expired")
 
     name = re.sub(r'[\\/:*?"<>|]', "_", meta.get("name", "transcript"))
-    filename = f"{name}.vtt"
+    filename = f"{name}.txt"
 
-    return FileResponse(vtt_file, media_type="text/vtt", filename=filename)
+    return FileResponse(vtt_file, media_type="text/plain", filename=filename)
 
 
 # ---------------------------------------------------------------------------

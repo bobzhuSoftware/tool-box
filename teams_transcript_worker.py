@@ -51,6 +51,20 @@ def _copy_profile_to_temp() -> tuple[str, str]:
             except OSError:
                 pass  # file locked — skip, auth will still work via remaining cookies
 
+    # Newer Edge versions (post-2023) store Cookies under a Network/ subdirectory.
+    # Copy that whole subdirectory if it exists.
+    network_src = os.path.join(src_profile, "Network")
+    if os.path.isdir(network_src):
+        network_dst = os.path.join(dst_profile, "Network")
+        os.makedirs(network_dst, exist_ok=True)
+        for fname in os.listdir(network_src):
+            src = os.path.join(network_src, fname)
+            if os.path.isfile(src):
+                try:
+                    shutil.copy2(src, os.path.join(network_dst, fname))
+                except OSError:
+                    pass
+
     # Local State lives one level up (user data dir root)
     local_state_src = os.path.join(EDGE_USER_DATA, "Local State")
     if os.path.isfile(local_state_src):
@@ -156,11 +170,31 @@ def status(msg: str):
     print(f"STATUS:{msg}", flush=True)
 
 
+def _resolve_input_url(url: str) -> str:
+    """Normalise any URL variant the user might paste:
+    - AccessDenied page  → extract the Source= query param (the real mp4/stream URL)
+    - plain mp4 URL      → convert to stream.aspx
+    - stream.aspx URL    → use as-is
+    """
+    from urllib.parse import urlparse as _up, parse_qs as _pqs, unquote as _uq
+    parsed = _up(url)
+    # Handle AccessDenied redirect pages
+    if "accessdenied" in parsed.path.lower():
+        qs = _pqs(parsed.query)
+        source = qs.get("Source", [""])[0]
+        if source:
+            url = _uq(source)
+            parsed = _up(url)
+    # Strip referrer/web query params to get clean mp4 URL
+    if parsed.path.lower().endswith(".mp4"):
+        url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    if "stream.aspx" in url:
+        return url
+    return mp4_url_to_stream_url(url)
+
+
 async def run(url: str, output_path: str):
-    if "stream.aspx" not in url:
-        stream_url = mp4_url_to_stream_url(url)
-    else:
-        stream_url = url
+    stream_url = _resolve_input_url(url)
 
     status(f"Connecting to SharePoint Stream…")
 

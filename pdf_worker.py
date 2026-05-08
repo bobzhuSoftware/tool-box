@@ -749,6 +749,7 @@ def main():
   {article_html}
 </body>
 </html>"""
+            print(f"TITLE:{title}", flush=True)
             _render_html_to_pdf(p, html_doc, output_path, status)
 
         else:

@@ -54,7 +54,7 @@ function TeamsTranscript({ token, onAuthError }) {
                 const event = JSON.parse(line.slice(6))
                 if (event.type === 'done') {
                   setResult({ job_id: event.job_id, name: event.name, lang: event.lang })
-                  addLog({ type: 'done', message: `✓ Transcript ready: ${event.name}.vtt` })
+                  addLog({ type: 'done', message: `✓ Transcript ready: ${event.name}.txt` })
                   // Auto-download
                   const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
                   window.open(`/api/teams-transcript/download/${event.job_id}${authParam}`, '_blank')
@@ -123,7 +123,7 @@ function TeamsTranscript({ token, onAuthError }) {
           <div className="result-info">
             <span className="result-label">Transcript downloaded</span>
             <span className="result-meta">
-              {result.name}.vtt{result.lang ? ` · ${result.lang}` : ''}
+              {result.name}.txt{result.lang ? ` · ${result.lang}` : ''}
             </span>
           </div>
           <button className="btn-primary" onClick={handleDownload}>
