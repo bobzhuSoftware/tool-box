@@ -952,6 +952,152 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
 
 
 # ---------------------------------------------------------------------------
+# Teams Transcript endpoint
+# ---------------------------------------------------------------------------
+_VTT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "vt_vtt_cache")
+os.makedirs(_VTT_CACHE_DIR, exist_ok=True)
+
+
+def _vtt_file_path(job_id: str) -> str:
+    return os.path.join(_VTT_CACHE_DIR, f"{job_id}.vtt")
+
+
+def _vtt_meta_path(job_id: str) -> str:
+    return os.path.join(_VTT_CACHE_DIR, f"{job_id}.json")
+
+
+class TeamsTranscriptRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/teams-transcript/stream")
+async def teams_transcript_stream(req: TeamsTranscriptRequest, user: User = Depends(require_user)):
+    url = req.url.strip()
+    if not _URL_PATTERN.match(url) and "sharepoint.com" not in url:
+        raise HTTPException(status_code=400, detail="Please provide a SharePoint/Teams recording URL")
+
+    q: stdlib_queue.Queue = stdlib_queue.Queue()
+
+    def run_worker():
+        import subprocess
+        import sys as _sys
+
+        worker = os.path.join(os.path.dirname(__file__), "teams_transcript_worker.py")
+        tmp = tempfile.NamedTemporaryFile(suffix=".vtt", delete=False)
+        tmp.close()
+
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        try:
+            proc = subprocess.Popen(
+                [_sys.executable, worker, url, tmp.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=_env,
+            )
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if line.startswith("STATUS:"):
+                    q.put({"type": "status", "message": line[7:]})
+                elif line.startswith("DONE:"):
+                    try:
+                        meta = json.loads(line[5:])
+                    except Exception:
+                        meta = {"name": "transcript", "lang": ""}
+                    q.put({"type": "_done_marker", "path": tmp.name, "meta": meta})
+                elif line.startswith("ERROR:"):
+                    q.put({"type": "error", "message": line[6:]})
+            proc.wait()
+            if proc.returncode != 0:
+                stderr_out = proc.stderr.read()[-600:]
+                # Only emit if not already handled by ERROR: line
+                q.put({"type": "_worker_exit", "code": proc.returncode, "stderr": stderr_out})
+        except Exception as e:
+            q.put({"type": "error", "message": str(e)})
+
+    thread = threading.Thread(target=run_worker, daemon=True)
+    thread.start()
+
+    async def generate():
+        job_id = uuid.uuid4().hex[:12]
+        error_seen = False
+        while True:
+            try:
+                event = q.get_nowait()
+            except stdlib_queue.Empty:
+                await asyncio.sleep(0.15)
+                continue
+
+            if event["type"] == "_done_marker":
+                vtt_path = event["path"]
+                meta = event.get("meta", {})
+                # Save meta
+                with open(_vtt_meta_path(job_id), "w", encoding="utf-8") as f:
+                    json.dump({"user_id": user.id, "name": meta.get("name", "transcript"), "lang": meta.get("lang", ""), "url": url}, f)
+                # Move vtt file
+                try:
+                    shutil.move(vtt_path, _vtt_file_path(job_id))
+                except OSError as exc:
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save VTT: {exc}'})}\n\n"
+                    break
+                yield f"data: {json.dumps({'type': 'done', 'job_id': job_id, 'name': meta.get('name', 'transcript'), 'lang': meta.get('lang', '')})}\n\n"
+                break
+            elif event["type"] == "error":
+                yield f"data: {json.dumps(event)}\n\n"
+                error_seen = True
+                break
+            elif event["type"] == "_worker_exit":
+                if not error_seen and event["code"] != 0:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Worker process failed unexpectedly.'})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/teams-transcript/download/{job_id}")
+def download_vtt(
+    job_id: str,
+    token: str | None = None,
+    user: User | None = Depends(get_current_user),
+):
+    # Support token as query param (for window.open downloads)
+    if user is None and token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid = payload.get("sub")
+            if uid:
+                with Session(engine) as s:
+                    user = s.get(User, uid)
+        except JWTError:
+            pass
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    vtt_file = _vtt_file_path(job_id)
+    meta_file = _vtt_meta_path(job_id)
+    if not os.path.isfile(vtt_file) or not os.path.isfile(meta_file):
+        raise HTTPException(status_code=404, detail="Transcript not found or expired")
+
+    with open(meta_file, encoding="utf-8") as f:
+        meta = json.load(f)
+    if meta.get("user_id") != user.id:
+        raise HTTPException(status_code=404, detail="Transcript not found or expired")
+
+    name = re.sub(r'[\\/:*?"<>|]', "_", meta.get("name", "transcript"))
+    filename = f"{name}.vtt"
+
+    return FileResponse(vtt_file, media_type="text/vtt", filename=filename)
+
+
+# ---------------------------------------------------------------------------
 # Serve React frontend (production build)
 # Must be registered AFTER all /api/* routes
 # ---------------------------------------------------------------------------

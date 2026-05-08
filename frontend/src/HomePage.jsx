@@ -24,6 +24,14 @@ function HomePage({ onSelectTool }) {
         'Extracts only the article text and images — removes ads, nav bars, and clutter — and saves as a clean readable PDF.',
       tags: ['PDF', 'Article', 'Readability'],
     },
+    {
+      id: 'teams',
+      icon: '📋',
+      title: 'Teams Transcript',
+      description:
+        'Paste a Teams recording URL and download the meeting transcript as a clean VTT file — no manual steps needed.',
+      tags: ['Teams', 'SharePoint', 'VTT'],
+    },
   ]
 
   return (

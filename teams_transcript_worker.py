@@ -1,0 +1,289 @@
+"""
+Teams Transcript Worker — run as a subprocess from server.py.
+
+Usage:
+    python teams_transcript_worker.py <url> <output_vtt_path>
+
+Progress is written to stdout as:
+    STATUS:<message>
+    DONE:<display_name>
+    ERROR:<message>
+"""
+import asyncio
+import io
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+from urllib.parse import urlparse, quote, unquote
+
+# Force UTF-8 stdout so the server can decode our STATUS/DONE/ERROR lines correctly
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
+EDGE_USER_DATA = r"C:\Users\BOBZHU01\AppData\Local\Microsoft\Edge\User Data"
+EDGE_PROFILE = "Profile 1"   # bob.zhu@dsv.com
+
+
+def _copy_profile_to_temp() -> tuple[str, str]:
+    """
+    Copy the Edge profile to a temp directory so Playwright can use it
+    even while Edge is still running with the original profile.
+
+    Returns (temp_user_data_dir, profile_name_to_use).
+    The profile is placed under a fresh user-data dir as "Default"
+    (Playwright's persistent context always uses whatever profile dir you point it at).
+    """
+    src_profile = os.path.join(EDGE_USER_DATA, EDGE_PROFILE)
+    tmp_dir = tempfile.mkdtemp(prefix="edge_pw_")
+    dst_profile = os.path.join(tmp_dir, "Default")
+
+    # Copy only the files that matter for auth cookies.
+    # Copying the full profile would be slow; we only need Cookies + Network Persistent State.
+    os.makedirs(dst_profile, exist_ok=True)
+    for fname in ("Cookies", "Network Persistent State", "Preferences",
+                  "Secure Preferences", "Local State"):
+        src = os.path.join(src_profile, fname)
+        if os.path.isfile(src):
+            try:
+                shutil.copy2(src, os.path.join(dst_profile, fname))
+            except OSError:
+                pass  # file locked — skip, auth will still work via remaining cookies
+
+    # Local State lives one level up (user data dir root)
+    local_state_src = os.path.join(EDGE_USER_DATA, "Local State")
+    if os.path.isfile(local_state_src):
+        try:
+            shutil.copy2(local_state_src, os.path.join(tmp_dir, "Local State"))
+        except OSError:
+            pass
+
+    return tmp_dir, "Default"
+
+# ---- UUID cue-identifier pattern ----------------------------------------
+# Matches lines like: aca214ba-5200-4ec1-8bbe-66c314ec0a0e/119-0
+_VTT_CUE_ID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/\d+-\d+\s*$',
+    re.IGNORECASE,
+)
+
+
+def clean_vtt(vtt_text: str) -> str:
+    """
+    Rebuild a WebVTT string into clean format:
+      - Remove UUID cue-identifier lines
+      - Remove stray blank lines inside cue blocks (between timestamp and text)
+      - Exactly one blank line between cue blocks
+    Result: WEBVTT header + blank line + (timestamp\\ntext\\n\\n) * N
+    """
+    lines = vtt_text.splitlines()
+
+    # Collect non-empty, non-UUID lines while tracking structure
+    output_cues = []   # each item: (timestamp_line, text_line)
+    i = 0
+
+    # Skip WEBVTT header line(s)
+    while i < len(lines) and not lines[i].strip().startswith("WEBVTT"):
+        i += 1
+    i += 1  # skip "WEBVTT" itself
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Skip blank lines between blocks
+        if not line:
+            i += 1
+            continue
+
+        # Skip UUID cue identifiers
+        if _VTT_CUE_ID_RE.match(line):
+            i += 1
+            continue
+
+        # Timestamp line (contains -->)
+        if "-->" in line:
+            timestamp = line
+            i += 1
+            # Gather text lines that follow (skip any blank lines mixed in)
+            text_parts = []
+            while i < len(lines):
+                tline = lines[i].strip()
+                if not tline:
+                    # A blank line ends this cue block
+                    i += 1
+                    break
+                if "-->" in tline or _VTT_CUE_ID_RE.match(tline):
+                    # Next cue started without blank separator — don't consume
+                    break
+                text_parts.append(tline)
+                i += 1
+            if text_parts:
+                output_cues.append((timestamp, " ".join(text_parts)))
+            continue
+
+        # Anything else — skip
+        i += 1
+
+    result_lines = ["WEBVTT", ""]
+    for timestamp, text in output_cues:
+        result_lines.append(timestamp)
+        result_lines.append(text)
+        result_lines.append("")  # one blank line separator
+
+    return "\n".join(result_lines) + "\n"
+
+
+def mp4_url_to_stream_url(mp4_url: str) -> str:
+    parsed = urlparse(mp4_url)
+    path = parsed.path
+    host = f"{parsed.scheme}://{parsed.netloc}"
+    parts = path.split("/")
+    site_root = "/" + "/".join(parts[1:3])
+    encoded_parts = []
+    for part in parts:
+        if part == "":
+            continue
+        decoded = unquote(part)
+        encoded = quote(decoded, safe="-.")
+        encoded = encoded.replace("_", "%5F")
+        encoded_parts.append(encoded)
+    encoded_path = "%2F" + "%2F".join(encoded_parts)
+    return f"{host}{site_root}/_layouts/15/stream.aspx?id={encoded_path}"
+
+
+def status(msg: str):
+    print(f"STATUS:{msg}", flush=True)
+
+
+async def run(url: str, output_path: str):
+    if "stream.aspx" not in url:
+        stream_url = mp4_url_to_stream_url(url)
+    else:
+        stream_url = url
+
+    status(f"Connecting to SharePoint Stream…")
+
+    from playwright.async_api import async_playwright
+
+    transcript_meta: dict = {}
+
+    # Copy profile to temp dir so Edge can stay open
+    status("Preparing browser session…")
+    tmp_user_data, tmp_profile = _copy_profile_to_temp()
+
+    try:
+        async with async_playwright() as p:
+            ctx = await p.chromium.launch_persistent_context(
+                user_data_dir=tmp_user_data,
+                channel="msedge",
+                headless=True,
+                args=["--no-first-run", f"--profile-directory={tmp_profile}"],
+            )
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+            async def on_response(response):
+                rurl = response.url
+                if "_api" in rurl and "v2.1" in rurl and "content" not in rurl:
+                    try:
+                        body = await response.body()
+                        if len(body) > 50 and not body[:5].startswith(b"<"):
+                            try:
+                                data = json.loads(body)
+                            except Exception:
+                                return
+                            transcripts = data.get("media", {}).get("transcripts", [])
+                            if transcripts:
+                                transcript_meta.update(transcripts[0])
+                    except Exception:
+                        pass
+
+            ctx.on("response", on_response)
+
+            status("Loading recording page…")
+            try:
+                await page.goto(stream_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+
+            await asyncio.sleep(2)
+            actual_url = page.url
+            if "login" in actual_url.lower() or "microsoftonline" in actual_url.lower():
+                print("ERROR:Authentication required — Edge session may have expired.", flush=True)
+                await ctx.close()
+                return
+            if "accessdenied" in actual_url.lower():
+                print("ERROR:Access denied — you may not have permission to view this recording.", flush=True)
+                await ctx.close()
+                return
+
+            status("Waiting for transcript metadata…")
+            for i in range(40):
+                await asyncio.sleep(1)
+                if transcript_meta:
+                    break
+                if i % 10 == 9:
+                    status(f"Still waiting… ({i+1}s)")
+
+            if not transcript_meta:
+                print("ERROR:No transcript found for this recording. It may not have been transcribed.", flush=True)
+                await ctx.close()
+                return
+
+            display_name = transcript_meta.get("displayName", "transcript.json")
+            lang = transcript_meta.get("languageTag", "")
+            size = transcript_meta.get("size", 0)
+            status(f"Found transcript: {display_name} ({lang}, {size // 1024} KB)")
+
+            download_url = transcript_meta.get("temporaryDownloadUrl", "")
+            if not download_url:
+                print("ERROR:Transcript metadata found but no download URL available.", flush=True)
+                await ctx.close()
+                return
+
+            status("Downloading transcript content…")
+            try:
+                result = await page.evaluate(f"""
+                    async () => {{
+                        const resp = await fetch({json.dumps(download_url)}, {{credentials: 'include'}});
+                        const status = resp.status;
+                        const text = await resp.text();
+                        return {{status, text, size: text.length}};
+                    }}
+                """)
+                http_status = result["status"]
+                vtt_text = result["text"]
+                size_bytes = result["size"]
+            except Exception as e:
+                print(f"ERROR:Download failed: {e}", flush=True)
+                await ctx.close()
+                return
+
+            if http_status != 200 or size_bytes < 10:
+                print(f"ERROR:Server returned HTTP {http_status}. You may not have access to this recording.", flush=True)
+                await ctx.close()
+                return
+
+            # Clean UUID cue identifiers
+            cleaned = clean_vtt(vtt_text)
+            status(f"Cleaned VTT ({size_bytes // 1024} KB)")
+
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(cleaned)
+
+            # Derive a safe filename from displayName (strip .json suffix)
+            base = re.sub(r"\.json$", "", display_name, flags=re.IGNORECASE)
+            safe_name = re.sub(r'[\\/:*?"<>|]', "_", base)
+
+            print(f"DONE:{json.dumps({'name': safe_name, 'lang': lang})}", flush=True)
+            await ctx.close()
+    finally:
+        # Always remove the temp profile copy
+        shutil.rmtree(tmp_user_data, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("ERROR:Usage: teams_transcript_worker.py <url> <output_path>", flush=True)
+        sys.exit(1)
+    asyncio.run(run(sys.argv[1], sys.argv[2]))
