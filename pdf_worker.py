@@ -804,36 +804,15 @@ def main():
 
             raw_html = page.content()
             page_title = page.title()
-            context.close()
 
-            # Download images with urllib (200 OK confirmed in diagnostics)
+            # Download images via Playwright's request API (shares the Firefox session's
+            # cookies and auth tokens — works even for CDN URLs that require authentication)
+            import re as _re2
             status(f"Downloading {len(image_items)} image(s)...")
-            import urllib.request, ssl, base64 as _b64, re as _re2
-
-            x_cookies = _read_firefox_cookies("https://x.com")
-            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in x_cookies)
-            ssl_ctx = ssl.create_default_context()
-            img_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0",
-                "Referer": "https://x.com/",
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                "Cookie": cookie_str,
-            }
-            url_to_data: dict = {}
-            for item in image_items:
-                src = item["src"]
-                if src in url_to_data:
-                    continue
-                try:
-                    req = urllib.request.Request(src, headers=img_headers)
-                    with urllib.request.urlopen(req, timeout=20, context=ssl_ctx) as resp:
-                        body_bytes = resp.read()
-                        if body_bytes:
-                            mime = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip()
-                            url_to_data[src] = f"data:{mime};base64,{_b64.b64encode(body_bytes).decode()}"
-                except Exception:
-                    pass
+            url_to_data = _download_page_images(page, image_items)
             status(f"Downloaded {len(url_to_data)}/{len(image_items)} image(s).")
+
+            context.close()
 
             # Readability extracts clean text (but strips images — we'll re-insert them)
             status("Extracting article text with Readability...")
