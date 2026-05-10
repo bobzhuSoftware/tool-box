@@ -55,10 +55,7 @@ function WebToPdf({ token, onAuthError }) {
                 const event = JSON.parse(line.slice(6))
                 if (event.type === 'done') {
                   setResult({ job_id: event.job_id })
-                  addLog({ type: 'done', message: 'PDF generated! Downloading...' })
-                  // Auto-trigger download immediately — avoids server-reload race
-                  const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
-                  window.open(`/api/pdf/download/${event.job_id}${authParam}`, '_blank')
+                  addLog({ type: 'done', message: 'PDF generated! Click below to download.' })
                 } else if (event.type === 'error') {
                   addLog({ type: 'error', message: event.message })
                 } else {

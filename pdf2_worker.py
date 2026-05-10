@@ -40,25 +40,10 @@ hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
 
 
 def _inline_images(page) -> None:
-    """Convert all img src to base64 data URLs while still in the browser."""
+    """Inline images via Playwright's Python-level request API (no CORS restrictions)."""
     try:
-        page.evaluate("""async () => {
-            const imgs = [...document.querySelectorAll('img')];
-            await Promise.all(imgs.map(async img => {
-                if (!img.src || img.src.startsWith('data:')) return;
-                try {
-                    const resp = await fetch(img.src, {credentials: 'include', mode: 'no-cors'});
-                    const blob = await resp.blob();
-                    if (blob.size === 0) return;
-                    await new Promise(resolve => {
-                        const reader = new FileReader();
-                        reader.onload = () => { img.src = reader.result; resolve(); };
-                        reader.onerror = resolve;
-                        reader.readAsDataURL(blob);
-                    });
-                } catch(e) {}
-            }));
-        }""")
+        from pdf_worker import _inline_images_via_request
+        _inline_images_via_request(page)
     except Exception:
         pass
 
@@ -139,9 +124,14 @@ def main():
             except Exception:
                 pass
 
-            # Inline images as base64 before grabbing HTML
-            status("Inlining images...")
-            _inline_images(page)
+            # Collect images with positions, then download via Playwright request API (no CORS)
+            status("Collecting image positions...")
+            from pdf_worker import _collect_page_images, _download_page_images, _extract_dom_title
+            image_items = _collect_page_images(page)
+            status(f"Downloading {len(image_items)} image(s)...")
+            url_to_data = _download_page_images(page, image_items)
+            status(f"Downloaded {len(url_to_data)} of {len(image_items)} image(s).")
+            dom_title = _extract_dom_title(page)
 
             raw_html = page.content()
             page_title = page.title()
@@ -154,14 +144,20 @@ def main():
 
     # Extract article with Readability
     status("Extracting article content...")
-    title, article_html = _extract_with_readability(raw_html, url)
-    if not title:
-        title = page_title or "Article"
+    _, article_html = _extract_with_readability(raw_html, url)
+    # Title priority: DOM extraction (og:title / h1) > page.title() fallback
+    title = dom_title or page_title or "Article"
 
     # Strip scripts from extracted HTML
     import re
     article_html = re.sub(r'<script[^>]*>.*?</script>', '', article_html, flags=re.DOTALL | re.IGNORECASE)
     article_html = re.sub(r'<script[^>]*/>', '', article_html, flags=re.IGNORECASE)
+
+    # Reinsert downloaded images at their original positions (Readability strips img tags)
+    from pdf_worker import _reinsert_images
+    article_html, n_imgs = _reinsert_images(article_html, image_items, url_to_data)
+    if n_imgs:
+        status(f"Inserted {n_imgs} image(s) into article.")
 
     # Build clean HTML document
     from urllib.parse import urlparse as _up
@@ -221,6 +217,7 @@ def main():
     except OSError:
         pass
 
+    print(f"TITLE:{title}", flush=True)
     print("DONE", flush=True)
 
 

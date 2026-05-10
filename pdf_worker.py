@@ -261,6 +261,216 @@ def _inline_images_via_request(page) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Image position helpers — used by both the X path and the generic article path
+# ---------------------------------------------------------------------------
+import re as _re_mod
+
+_tag_re = _re_mod.compile(r'<[^>]+>')
+_block_close_re = _re_mod.compile(r'</(p|li|blockquote|h[1-6]|div)>', _re_mod.IGNORECASE)
+
+
+def _find_html_pos_for_text(html: str, phrase_words: list, from_start: bool) -> int | None:
+    """Find the HTML offset just before/after a text phrase, snapped to a block boundary."""
+    plain = _tag_re.sub('', html)
+    for n in (min(10, len(phrase_words)), 6, 3):
+        if n < 2:
+            break
+        phrase = ' '.join(phrase_words[:n] if from_start else phrase_words[-n:])
+        idx = plain.find(phrase) if from_start else plain.rfind(phrase)
+        if idx < 0:
+            continue
+        target = idx + (0 if from_start else len(phrase))
+        text_count, html_i = 0, 0
+        while html_i < len(html) and text_count < target:
+            m = _tag_re.match(html, html_i)
+            if m:
+                html_i = m.end()
+            else:
+                html_i += 1
+                text_count += 1
+        if from_start:
+            m2 = _block_close_re.search(html, 0, html_i)
+            return m2.end() if m2 else 0
+        else:
+            m2 = _block_close_re.search(html, html_i)
+            return m2.end() if m2 else len(html)
+    return None
+
+
+def _pos_by_ratio(html: str, ratio: float) -> int:
+    """Return an HTML offset at `ratio` (0–1) through the plain-text, snapped to a block close."""
+    plain = _tag_re.sub('', html)
+    target = int(len(plain) * max(0.0, min(1.0, ratio)))
+    text_count, html_i = 0, 0
+    while html_i < len(html) and text_count < target:
+        m = _tag_re.match(html, html_i)
+        if m:
+            html_i = m.end()
+        else:
+            html_i += 1
+            text_count += 1
+    m2 = _block_close_re.search(html, html_i)
+    return m2.end() if m2 else len(html)
+
+
+def _insert_image(html: str, anchor_before: str, anchor_after: str,
+                  position: float, img_tag: str) -> str:
+    """Insert img_tag using anchor text matching, falling back to position ratio."""
+    pos = None
+    if anchor_before.strip():
+        pos = _find_html_pos_for_text(html, anchor_before.split(), from_start=False)
+    if pos is None and anchor_after.strip():
+        pos = _find_html_pos_for_text(html, anchor_after.split(), from_start=True)
+    if pos is None:
+        pos = _pos_by_ratio(html, position)
+    return html[:pos] + img_tag + html[pos:]
+
+
+def _collect_page_images(page) -> list:
+    """Walk the page DOM and collect meaningful images with text anchors and position ratios."""
+    try:
+        return page.evaluate(r"""() => {
+            const results = [];
+            const seen = new Set();
+            const allNodes = [];
+            const walker = document.createTreeWalker(
+                document.body,
+                NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+                { acceptNode(n) {
+                    if (n.nodeType === 1) {
+                        const t = n.tagName;
+                        if (['SCRIPT','STYLE','NOSCRIPT','NAV','HEADER','FOOTER'].includes(t))
+                            return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }}
+            );
+            let node;
+            while ((node = walker.nextNode())) {
+                if (node.nodeType === 3) {
+                    const t = node.textContent.replace(/\s+/g, ' ');
+                    if (t.trim()) allNodes.push({ type: 'text', text: t });
+                } else if (node.nodeType === 1 && node.tagName === 'IMG') {
+                    const src = node.currentSrc || node.src || '';
+                    const w = node.naturalWidth || 0;
+                    const h = node.naturalHeight || 0;
+                    if (src && src.startsWith('http') && !seen.has(src)
+                            && (w === 0 || w >= 100) && (h === 0 || h >= 80)) {
+                        seen.add(src);
+                        allNodes.push({ type: 'img', src });
+                    }
+                }
+            }
+            const totalText = allNodes.filter(n => n.type === 'text')
+                                      .reduce((s, n) => s + n.text.length, 0);
+            let runningText = 0;
+            for (let i = 0; i < allNodes.length; i++) {
+                if (allNodes[i].type === 'text') { runningText += allNodes[i].text.length; continue; }
+                if (allNodes[i].type !== 'img') continue;
+                let before = '', after = '';
+                for (let j = i - 1; j >= 0 && before.length < 120; j--) {
+                    if (allNodes[j].type === 'text') before = allNodes[j].text + before;
+                }
+                for (let j = i + 1; j < allNodes.length && after.length < 120; j++) {
+                    if (allNodes[j].type === 'text') after += allNodes[j].text;
+                }
+                results.push({
+                    src: allNodes[i].src,
+                    anchorBefore: before.trim().slice(-120),
+                    anchorAfter: after.trim().slice(0, 120),
+                    position: totalText > 0 ? runningText / totalText : 0,
+                });
+            }
+            return results;
+        }""")
+    except Exception:
+        return []
+
+
+def _download_page_images(page, image_items: list) -> dict:
+    """Download images via Playwright's request API (shares browser cookies, no CORS). Returns url->data_uri."""
+    import base64
+    url_to_data: dict = {}
+    unique_srcs = list(dict.fromkeys(item['src'] for item in image_items))
+    for src in unique_srcs:
+        try:
+            resp = page.request.get(src, timeout=12_000)
+            if resp.ok:
+                body = resp.body()
+                if body:
+                    mime = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+                    url_to_data[src] = f"data:{mime};base64,{base64.b64encode(body).decode()}"
+        except Exception:
+            pass
+    return url_to_data
+
+
+def _reinsert_images(article_html: str, image_items: list, url_to_data: dict) -> tuple[str, int]:
+    """Insert downloaded images back into Readability-extracted HTML at their original positions."""
+    count = 0
+    for item in image_items:
+        src = item.get('src', '')
+        if src not in url_to_data:
+            continue
+        img_tag = (
+            f'<figure style="margin:24px 0;text-align:center;">'
+            f'<img src="{url_to_data[src]}" alt="" '
+            f'style="max-width:100%;height:auto;border-radius:6px;">'
+            f'</figure>'
+        )
+        article_html = _insert_image(
+            article_html,
+            item.get('anchorBefore', ''),
+            item.get('anchorAfter', ''),
+            item.get('position', 0.0),
+            img_tag,
+        )
+        count += 1
+    return article_html, count
+
+
+def _extract_dom_title(page) -> str:
+    """
+    Extract the cleanest article title from the live browser page.
+    Priority: og:title → twitter:title → first meaningful <h1> → document.title (site-suffix stripped).
+    Returns empty string if nothing useful is found.
+    """
+    try:
+        return page.evaluate(r"""() => {
+            // 1. Open Graph title — almost always the clean article title
+            const og = document.querySelector('meta[property="og:title"]');
+            if (og) { const t = (og.getAttribute('content') || '').trim(); if (t.length > 4) return t; }
+
+            // 2. Twitter Card title
+            const tw = document.querySelector('meta[name="twitter:title"]');
+            if (tw) { const t = (tw.getAttribute('content') || '').trim(); if (t.length > 4) return t; }
+
+            // 3. First <h1> inside likely article containers
+            const containers = [
+                document.querySelector('article'),
+                document.querySelector('main'),
+                document.querySelector('[role="main"]'),
+                document.body,
+            ].filter(Boolean);
+            for (const el of containers) {
+                const h1s = [...el.querySelectorAll('h1')];
+                if (!h1s.length) continue;
+                const t = h1s[0].textContent.trim();
+                if (t.length > 4) return t;
+            }
+
+            // 4. document.title — strip trailing " | Site", " - Site", " – Site", " — Site"
+            const raw = document.title.trim();
+            const stripped = raw.replace(/\s*[\|–—\-]\s*[^\|–—\-]{2,60}$/, '').trim();
+            if (stripped.length > 4) return stripped;
+
+            return raw;
+        }""") or ''
+    except Exception:
+        return ''
+
+
 def _extract_with_readability(html: str, url: str) -> tuple[str, str]:
     """Return (title, article_html) using readability-lxml."""
     try:
@@ -309,18 +519,25 @@ def _render_html_to_pdf(p, html_doc: str, output_path: str, status_fn) -> None:
         pass
 
 
-def _build_article_html(raw_html: str, page_title: str, url: str) -> str:
+def _build_article_html(raw_html: str, page_title: str, url: str, *,
+                        image_items: list | None = None,
+                        url_to_data: dict | None = None,
+                        dom_title: str = '') -> str:
     """Run Readability extraction and return a clean, self-contained HTML document."""
     import re as _re
     from urllib.parse import urlparse as _up
 
-    title, article_html = _extract_with_readability(raw_html, url)
-    if not title:
-        title = page_title or "Article"
+    _, article_html = _extract_with_readability(raw_html, url)
+    # Title priority: DOM extraction > readability > page.title() fallback
+    title = dom_title or page_title or "Article"
 
     # Strip any remaining scripts from extracted body
     article_html = _re.sub(r'<script[^>]*>.*?</script>', '', article_html, flags=_re.DOTALL | _re.IGNORECASE)
     article_html = _re.sub(r'<script[^>]*/>', '', article_html, flags=_re.IGNORECASE)
+
+    # Reinsert images at their original positions (Readability strips img tags)
+    if image_items and url_to_data:
+        article_html, _ = _reinsert_images(article_html, image_items, url_to_data)
 
     domain = _up(url).hostname or url
     return f"""<!DOCTYPE html>
@@ -799,16 +1016,22 @@ def main():
                     }""")
                 except Exception:
                     pass
-                status("Inlining images...")
-                _inline_images(page)
-                status("Extracting article content...")
+                status("Collecting image positions...")
+                image_items = _collect_page_images(page)
+                status(f"Downloading {len(image_items)} image(s)...")
+                url_to_data = _download_page_images(page, image_items)
+                status(f"Downloaded {len(url_to_data)} of {len(image_items)} image(s).")
+                dom_title = _extract_dom_title(page)
                 raw_html = page.content()
                 page_title = page.title()
             finally:
                 context.close()
                 browser.close()
 
-            html_doc = _build_article_html(raw_html, page_title, url)
+            html_doc = _build_article_html(raw_html, page_title, url,
+                                           image_items=image_items, url_to_data=url_to_data,
+                                           dom_title=dom_title)
+            print(f"TITLE:{dom_title or page_title}", flush=True)
             _render_html_to_pdf(p, html_doc, output_path, status)
 
     print("DONE", flush=True)

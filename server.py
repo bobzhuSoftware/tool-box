@@ -918,12 +918,15 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
                 stderr=subprocess.PIPE,
                 text=True,
             )
+            captured_title = ""
             for raw_line in proc.stdout:
                 line = raw_line.strip()
                 if line.startswith("STATUS:"):
                     q.put({"type": "status", "message": line[7:]})
+                elif line.startswith("TITLE:"):
+                    captured_title = line[6:]
                 elif line == "DONE":
-                    q.put({"type": "_done_marker", "path": tmp.name})
+                    q.put({"type": "_done_marker", "path": tmp.name, "title": captured_title})
             proc.wait()
             if proc.returncode != 0:
                 stderr_out = proc.stderr.read()[-400:]
@@ -945,8 +948,9 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
 
             if event["type"] == "_done_marker":
                 pdf_path = event["path"]
+                article_title = event.get("title", "")
                 try:
-                    _save_pdf_job(job_id, pdf_path, user.id, url)
+                    _save_pdf_job(job_id, pdf_path, user.id, url, article_title)
                 except OSError as exc:
                     yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save PDF: {exc}'})}\n\n"
                     break
