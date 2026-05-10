@@ -634,6 +634,44 @@ def main():
             context.add_init_script(_STEALTH_JS)
 
             page = context.new_page()
+
+            # Capture images via route interception — works regardless of auth/CDN quirks
+            # because we read the bytes the browser itself receives, not a separate request.
+            import base64 as _b64_cap
+            import re as _re2
+            captured_images: dict = {}  # url -> data-uri
+
+            def _handle_img_route(route):
+                try:
+                    response = route.fetch()
+                except Exception:
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+                    return
+                try:
+                    req_url = route.request.url
+                    if response.ok:
+                        body = response.body()
+                        if body:
+                            ct = (response.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
+                            captured_images[req_url] = f"data:{ct};base64,{_b64_cap.b64encode(body).decode()}"
+                except Exception:
+                    pass
+                try:
+                    route.fulfill(response=response)
+                except Exception:
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+
+            try:
+                page.route("**/pbs.twimg.com/**", _handle_img_route)
+            except Exception:
+                pass
+
             status("Loading page...")
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
 
@@ -805,11 +843,37 @@ def main():
             raw_html = page.content()
             page_title = page.title()
 
-            # Download images via Playwright's request API (shares the Firefox session's
-            # cookies and auth tokens — works even for CDN URLs that require authentication)
-            import re as _re2
+            # Build url_to_data from route-captured images, matched to collected image_items.
+            # The captured URL key may differ from currentSrc (different `name=` variant),
+            # so we normalise by stripping the `name=` query param for matching.
+
+            def _strip_name(u: str) -> str:
+                return _re2.sub(r'[?&]name=[^&]*', '', u)
+
+            url_to_data: dict = {}
+            for item in image_items:
+                src = item["src"]
+                if src in captured_images:
+                    url_to_data[src] = captured_images[src]
+                    continue
+                # Try normalised match
+                norm_src = _strip_name(src)
+                for cap_url, cap_data in captured_images.items():
+                    if _strip_name(cap_url) == norm_src:
+                        url_to_data[src] = cap_data
+                        break
+                    # Base-path match (ignore all query params)
+                    if cap_url.split("?")[0] == src.split("?")[0]:
+                        url_to_data[src] = cap_data
+                        break
+
             status(f"Downloading {len(image_items)} image(s)...")
-            url_to_data = _download_page_images(page, image_items)
+            # Fallback: for any image not captured via route, try page.request.get()
+            uncaptured = [item["src"] for item in image_items if item["src"] not in url_to_data]
+            if uncaptured:
+                fallback = _download_page_images(page, [{"src": s} for s in uncaptured])
+                url_to_data.update(fallback)
+
             status(f"Downloaded {len(url_to_data)}/{len(image_items)} image(s).")
 
             context.close()
