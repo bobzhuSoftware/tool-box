@@ -635,42 +635,28 @@ def main():
 
             page = context.new_page()
 
-            # Capture images via route interception — works regardless of auth/CDN quirks
-            # because we read the bytes the browser itself receives, not a separate request.
+            # Passively capture image responses as the browser loads them.
+            # Using page.on("response") is more reliable than route interception
+            # with Firefox persistent contexts — no request interference at all.
             import base64 as _b64_cap
             import re as _re2
             captured_images: dict = {}  # url -> data-uri
 
-            def _handle_img_route(route):
+            def _on_response(response):
                 try:
-                    response = route.fetch()
-                except Exception:
-                    try:
-                        route.continue_()
-                    except Exception:
-                        pass
-                    return
-                try:
-                    req_url = route.request.url
-                    if response.ok:
-                        body = response.body()
-                        if body:
-                            ct = (response.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
-                            captured_images[req_url] = f"data:{ct};base64,{_b64_cap.b64encode(body).decode()}"
+                    rurl = response.url
+                    if "pbs.twimg.com/media" not in rurl:
+                        return
+                    if not response.ok:
+                        return
+                    body = response.body()
+                    if body:
+                        ct = (response.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
+                        captured_images[rurl] = f"data:{ct};base64,{_b64_cap.b64encode(body).decode()}"
                 except Exception:
                     pass
-                try:
-                    route.fulfill(response=response)
-                except Exception:
-                    try:
-                        route.continue_()
-                    except Exception:
-                        pass
 
-            try:
-                page.route("**/pbs.twimg.com/**", _handle_img_route)
-            except Exception:
-                pass
+            page.on("response", _on_response)
 
             status("Loading page...")
             page.goto(url, wait_until="domcontentloaded", timeout=60_000)
