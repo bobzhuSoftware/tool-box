@@ -6,6 +6,14 @@ import os
 import sys
 import tempfile
 
+# Force UTF-8 output so Chinese/Unicode titles don't crash on Windows (cp1252)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+# Switch to SelectorEventLoop on Windows to avoid the ProactorEventLoop bug
+# that prints "ValueError: I/O operation on closed pipe" during asyncio cleanup.
+
+
 
 def status(msg: str):
     print(f"STATUS:{msg}", flush=True)

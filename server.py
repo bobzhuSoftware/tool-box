@@ -787,7 +787,18 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
             )
+            # Drain stderr in a background thread to prevent the subprocess
+            # from blocking when its stderr pipe buffer fills up (e.g. Firefox
+            # printing lots of debug lines during headless startup on Windows).
+            stderr_lines: list = []
+            def _drain_stderr():
+                for ln in proc.stderr:
+                    stderr_lines.append(ln)
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
             captured_title = ""
             for raw_line in proc.stdout:
                 line = raw_line.strip()
@@ -798,9 +809,19 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
                 elif line == "DONE":
                     q.put({"type": "_done_marker", "path": tmp.name, "title": captured_title})
             proc.wait()
+            stderr_thread.join(timeout=5)
             if proc.returncode != 0:
-                stderr_out = proc.stderr.read()[-400:]
-                q.put({"type": "error", "message": f"PDF generation failed: {stderr_out}"})
+                stderr_out = "".join(stderr_lines)
+                # Ignore benign asyncio ProactorEventLoop cleanup noise on Windows.
+                real_errors = "\n".join(
+                    ln for ln in stderr_out.splitlines()
+                    if "Exception ignored in" not in ln
+                    and "proactor_events" not in ln
+                    and "windows_utils" not in ln
+                    and "I/O operation on closed pipe" not in ln
+                ).strip()
+                if real_errors:
+                    q.put({"type": "error", "message": f"PDF generation failed: {real_errors[-400:]}"})
         except Exception as e:
             q.put({"type": "error", "message": str(e)})
 
@@ -917,7 +938,17 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
             )
+            # Drain stderr in a background thread to prevent the subprocess
+            # from blocking when its stderr pipe buffer fills up.
+            stderr_lines: list = []
+            def _drain_stderr():
+                for ln in proc.stderr:
+                    stderr_lines.append(ln)
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
             captured_title = ""
             for raw_line in proc.stdout:
                 line = raw_line.strip()
@@ -928,9 +959,19 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
                 elif line == "DONE":
                     q.put({"type": "_done_marker", "path": tmp.name, "title": captured_title})
             proc.wait()
+            stderr_thread.join(timeout=5)
             if proc.returncode != 0:
-                stderr_out = proc.stderr.read()[-400:]
-                q.put({"type": "error", "message": f"PDF generation failed: {stderr_out}"})
+                stderr_out = "".join(stderr_lines)
+                # Ignore benign asyncio ProactorEventLoop cleanup noise on Windows.
+                real_errors = "\n".join(
+                    ln for ln in stderr_out.splitlines()
+                    if "Exception ignored in" not in ln
+                    and "proactor_events" not in ln
+                    and "windows_utils" not in ln
+                    and "I/O operation on closed pipe" not in ln
+                ).strip()
+                if real_errors:
+                    q.put({"type": "error", "message": f"PDF generation failed: {real_errors[-400:]}"})
         except Exception as e:
             q.put({"type": "error", "message": str(e)})
 

@@ -64,6 +64,17 @@ if (-not (Test-Path (Join-Path $scriptRoot 'server.py'))) {
   throw "Backend entry point server.py not found in: $scriptRoot"
 }
 
+# Prefer the project-local virtual environment; fall back to system python
+$venvPython = Join-Path $scriptRoot '.venv\Scripts\python.exe'
+if (Test-Path $venvPython) {
+  $pythonExe = $venvPython
+  Write-Host "Using virtual environment: $venvPython"
+} else {
+  Write-Host "WARNING: .venv not found. Run 'npm run setup' first to create it."
+  Write-Host "Falling back to system python..."
+  $pythonExe = 'python'
+}
+
 if ($StopExisting) {
   Stop-ListeningProcessByPort -Port $BackendPort
   Stop-ListeningProcessByPort -Port $FrontendPort
@@ -85,13 +96,11 @@ if ($FrontendPort -ne $requestedFrontendPort) {
 
 Write-Host "Starting backend and frontend in this single window..."
 
-$pythonExe = 'C:\Users\BOBZHU01\AppData\Local\Programs\Python\Python313\python.exe'
-
 $backendJob = Start-Job -Name 'backend-dev' -ScriptBlock {
   param([string]$Dir, [int]$Port, [string]$Python)
 
   Set-Location $Dir
-  & $Python -m uvicorn server:app --reload --host 0.0.0.0 --port $Port 2>&1 | ForEach-Object { $_.ToString() }
+  & $Python -m uvicorn server:app --reload --reload-exclude ".venv" --host 0.0.0.0 --port $Port 2>&1 | ForEach-Object { $_.ToString() }
 } -ArgumentList $scriptRoot, $BackendPort, $pythonExe
 
 Write-Host "Waiting for backend to be ready on port $BackendPort..."

@@ -11,23 +11,34 @@ A web app that generates transcripts from YouTube videos using [yt-dlp](https://
 
 ## Setup
 
+**One-click setup (recommended)** — creates a `.venv` virtual environment and installs all dependencies:
+
 ```bash
-# One-click install all dependencies (Python + frontend)
 npm run setup
 ```
 
-Or install manually:
+This runs:
+1. `python -m venv .venv` — creates an isolated Python environment in the project folder
+2. `.venv\Scripts\python.exe -m pip install -r requirements.txt` — installs Python packages into the venv
+3. `npm install` inside `frontend/`
+
+Or set up manually:
 
 ```bash
-# Install Python dependencies
+# Create and activate the virtual environment
+python -m venv .venv
+.venv\Scripts\activate   # Windows PowerShell / CMD
+
+# Install Python dependencies into the venv
 pip install -r requirements.txt
 
-# Install root + frontend Node dependencies
-npm install
+# Install frontend Node dependencies
 cd frontend && npm install
 ```
 
 ## Running
+
+> **Prerequisite:** Run `npm run setup` once to create the `.venv` virtual environment before starting.
 
 **One-click start (recommended):**
 
@@ -41,7 +52,7 @@ This starts both the backend (port 8000) and frontend (port 5173) simultaneously
 
 ```bash
 # Terminal 1 — Start the backend (port 8000)
-python -m uvicorn server:app --reload
+.venv\Scripts\python.exe -m uvicorn server:app --reload
 
 # Terminal 2 — Start the frontend (port 5173)
 cd frontend
