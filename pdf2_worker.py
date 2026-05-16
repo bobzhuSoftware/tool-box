@@ -132,6 +132,39 @@ def main():
             except Exception:
                 pass
 
+            # Wait for any content triggered by scrolling to finish loading
+            try:
+                page.wait_for_load_state("networkidle", timeout=5_000)
+            except Exception:
+                pass
+
+            # X articles (Notes) lazy-load text content as the page grows —
+            # do a second, slower scroll that tracks expanding scrollHeight
+            if "x.com" in hostname or "twitter.com" in hostname:
+                status("Loading X article content (slow scroll)...")
+                try:
+                    page.evaluate("""async () => {
+                        let prevHeight = 0;
+                        for (let attempt = 0; attempt < 15; attempt++) {
+                            const h = document.body.scrollHeight;
+                            if (h === prevHeight) break;
+                            prevHeight = h;
+                            for (let y = 0; y < h; y += 300) {
+                                window.scrollTo(0, y);
+                                await new Promise(r => setTimeout(r, 200));
+                            }
+                            await new Promise(r => setTimeout(r, 1500));
+                        }
+                        window.scrollTo(0, 0);
+                        await new Promise(r => setTimeout(r, 500));
+                    }""")
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5_000)
+                except Exception:
+                    pass
+
             # Collect images with positions, then download via Playwright request API (no CORS)
             status("Collecting image positions...")
             from pdf_worker import _collect_page_images, _download_page_images, _extract_dom_title

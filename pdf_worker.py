@@ -714,6 +714,17 @@ def main():
                     "dom.webdriver.enabled": False,
                     "useAutomationExtension": False,
                     "privacy.resistFingerprinting": False,
+                    # Spoof a real Firefox UA so X.com doesn't flag headless
+                    "general.useragent.override": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) "
+                        "Gecko/20100101 Firefox/136.0"
+                    ),
+                    # Reduce fingerprinting signals
+                    "media.navigator.enabled": True,
+                    "media.peerconnection.enabled": False,
+                    "devtools.debugger.remote-enabled": False,
+                    "network.http.referer.XOriginPolicy": 0,
+                    "network.http.referer.XOriginTrimmingPolicy": 0,
                 },
             )
             context.add_init_script(_STEALTH_JS)
@@ -745,7 +756,17 @@ def main():
             page.on("response", _on_response)
 
             status("Loading page...")
-            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            except Exception:
+                # X.com challenge/bot detection may block domcontentloaded from
+                # firing. Fall back to "commit" (fires as soon as the HTTP
+                # response starts) so we can still work with whatever loads.
+                status("domcontentloaded timed out — retrying with minimal wait...")
+                try:
+                    page.goto(url, wait_until="commit", timeout=30_000)
+                except Exception:
+                    pass  # Proceed with whatever content is in the page
 
             status("Waiting for content to render...")
             try:
@@ -765,7 +786,7 @@ def main():
                 status("Progressbar wait timed out, proceeding...")
                 page.wait_for_timeout(4_000)
 
-            # Scroll to trigger lazy images — faster, no route blocking
+            # First pass: fast scroll to trigger image lazy-loading
             status("Scrolling page to load images...")
             try:
                 page.evaluate("""async () => {
@@ -777,6 +798,42 @@ def main():
                     window.scrollTo(0, 0);
                     await new Promise(r => setTimeout(r, 800));
                 }""")
+            except Exception:
+                pass
+
+            # Wait for anything triggered by the first scroll
+            try:
+                page.wait_for_load_state("networkidle", timeout=5_000)
+            except Exception:
+                pass
+
+            # Second pass: slow scroll that tracks expanding scrollHeight.
+            # X articles lazy-load text content as the page grows — the first
+            # pass uses a fixed height captured before content was rendered, so
+            # the lower half of long articles is never scrolled into view.
+            status("Loading full article content (slow scroll)...")
+            try:
+                page.evaluate("""async () => {
+                    let prevHeight = 0;
+                    for (let attempt = 0; attempt < 15; attempt++) {
+                        const h = document.body.scrollHeight;
+                        if (h === prevHeight) break;
+                        prevHeight = h;
+                        for (let y = 0; y < h; y += 300) {
+                            window.scrollTo(0, y);
+                            await new Promise(r => setTimeout(r, 200));
+                        }
+                        await new Promise(r => setTimeout(r, 1500));
+                    }
+                    window.scrollTo(0, 0);
+                    await new Promise(r => setTimeout(r, 500));
+                }""")
+            except Exception:
+                pass
+
+            # Final networkidle to let any last requests settle
+            try:
+                page.wait_for_load_state("networkidle", timeout=5_000)
             except Exception:
                 pass
 
@@ -857,6 +914,47 @@ def main():
             raw_html = page.content()
             page_title = page.title()
 
+            # Direct DOM extraction — bypasses Readability for X articles.
+            # Readability penalises high link-density sections (e.g. cashtag-heavy
+            # articles with $MU, $NVDA etc.) and silently drops them.  Pulling the
+            # HTML straight from the article container avoids this scoring problem.
+            status("Extracting article content from DOM...")
+            x_dom_article_html = ''
+            try:
+                x_dom_article_html = page.evaluate("""() => {
+                    // Walk up from the article title marker to a container that holds
+                    // both the title and the body (> 500 chars of visible text).
+                    const titleEl = document.querySelector(
+                        '[data-testid="twitter-article-title"]'
+                    );
+                    if (!titleEl) return '';
+
+                    let container = titleEl.parentElement;
+                    for (let i = 0; i < 20 && container && container !== document.body; i++) {
+                        if ((container.innerText || '').trim().length > 500) break;
+                        container = container.parentElement;
+                    }
+                    if (!container || container === document.body) return '';
+
+                    // Clone so we can strip chrome without touching the live DOM.
+                    const clone = container.cloneNode(true);
+                    const rmSelectors = [
+                        'button', '[role="button"]',
+                        'nav', '[role="navigation"]',
+                        'aside', '[data-testid="sidebarColumn"]',
+                        '[data-testid="UserAvatar-Container"]',
+                        '[data-testid="placementTracking"]',
+                        '[data-testid="DMDrawer"]',
+                        'script', 'style', 'noscript',
+                    ];
+                    for (const sel of rmSelectors) {
+                        clone.querySelectorAll(sel).forEach(el => el.remove());
+                    }
+                    return clone.innerHTML;
+                }""") or ''
+            except Exception:
+                x_dom_article_html = ''
+
             url_to_data: dict = {}
 
             status(f"Downloading {len(image_items)} image(s)...")
@@ -903,6 +1001,18 @@ def main():
                 title = x_dom_title
             if not title:
                 title = x_dom_title or page_title or "Article"
+
+            # If direct DOM extraction captured significantly more text than Readability
+            # (e.g. cashtag-heavy articles where Readability drops link-dense sections),
+            # use the DOM version instead.
+            if x_dom_article_html:
+                _strip_tags = _re2.compile(r'<[^>]+>')
+                dom_len  = len(_strip_tags.sub('', x_dom_article_html))
+                read_len = len(_strip_tags.sub('', article_html))
+                if dom_len > read_len * 1.3:
+                    status(f"DOM extraction ({dom_len} chars) > Readability ({read_len} chars) — using DOM version.")
+                    article_html = x_dom_article_html
+
             article_html = _re2.sub(r'<script[^>]*>.*?</script>', '', article_html,
                                     flags=_re2.DOTALL | _re2.IGNORECASE)
             article_html = _re2.sub(r'<script[^>]*/>', '', article_html, flags=_re2.IGNORECASE)
