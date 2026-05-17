@@ -5,6 +5,7 @@ import VideoTranscript from './VideoTranscript'
 import WebToPdf from './WebToPdf'
 import WebToPdf2 from './WebToPdf2'
 import TeamsTranscript from './TeamsTranscript'
+import BookConverter from './BookConverter'
 
 function App() {
   // --- Auth state ---
@@ -125,6 +126,7 @@ function App() {
       {currentTool === 'webtopdf' && <WebToPdf token={token} onAuthError={handleLogout} />}
       {currentTool === 'webtopdf2' && <WebToPdf2 token={token} onAuthError={handleLogout} />}
       {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
+      {currentTool === 'bookconvert' && <BookConverter token={token} onAuthError={handleLogout} />}
     </div>
   )
 }

@@ -9,3 +9,5 @@ bcrypt
 python-multipart
 playwright
 Pillow
+EbookLib
+PyMuPDF

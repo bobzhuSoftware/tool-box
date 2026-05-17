@@ -10,10 +10,15 @@ RUN npm run build
 # ── Stage 2: Python backend ─────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Install ffmpeg (required by yt-dlp + whisper)
+# Install ffmpeg (required by yt-dlp + whisper) and Calibre (for high-quality EPUB↔PDF)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
+    calibre \
+    xvfb \
+    xdg-utils \
+    fonts-noto \
+    fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -31,7 +36,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install --with-deps chromium
 
 # Copy backend source
-COPY server.py transcribe.py pdf_worker.py ./
+COPY server.py transcribe.py pdf_worker.py book_converter_worker.py ./
 
 # Copy compiled frontend from Stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

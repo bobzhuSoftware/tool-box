@@ -1010,6 +1010,198 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
 
 
 # ---------------------------------------------------------------------------
+# Book format conversion (PDF ↔ EPUB)
+# ---------------------------------------------------------------------------
+_BOOK_CACHE_DIR = os.path.join(tempfile.gettempdir(), "vt_book_cache")
+os.makedirs(_BOOK_CACHE_DIR, exist_ok=True)
+
+
+def _book_file_path(job_id: str, ext: str) -> str:
+    return os.path.join(_BOOK_CACHE_DIR, f"{job_id}{ext}")
+
+
+def _book_meta_path(job_id: str) -> str:
+    return os.path.join(_BOOK_CACHE_DIR, f"{job_id}.json")
+
+
+def _save_book_job(job_id: str, src_path: str, user_id: str, filename: str) -> None:
+    ext = os.path.splitext(filename)[1].lower()
+    shutil.move(src_path, _book_file_path(job_id, ext))
+    with open(_book_meta_path(job_id), "w", encoding="utf-8") as f:
+        json.dump({"user_id": user_id, "filename": filename, "ext": ext}, f)
+
+
+def _get_book_job(job_id: str, user_id: str) -> tuple[str, str] | None:
+    """Return (file_path, download_filename) if job belongs to user, else None."""
+    meta_path = _book_meta_path(job_id)
+    if not os.path.isfile(meta_path):
+        return None
+    with open(meta_path, encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("user_id") != user_id:
+        return None
+    ext = data.get("ext", "")
+    file_path = _book_file_path(job_id, ext)
+    if not os.path.isfile(file_path):
+        return None
+    return file_path, data["filename"]
+
+
+@app.post("/api/book/convert")
+async def book_convert(
+    file: UploadFile = File(...),
+    direction: str = Form(...),
+    user: User = Depends(require_user),
+):
+    """Accept an uploaded book file and stream conversion progress (SSE)."""
+    if direction not in ("epub2pdf", "pdf2epub"):
+        raise HTTPException(status_code=400, detail="direction must be 'epub2pdf' or 'pdf2epub'")
+
+    original_name = file.filename or "upload"
+    src_ext = os.path.splitext(original_name)[1].lower()
+    expected_src = ".epub" if direction == "epub2pdf" else ".pdf"
+    if src_ext != expected_src:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected a {expected_src.upper()} file for this conversion direction",
+        )
+
+    out_ext = ".pdf" if direction == "epub2pdf" else ".epub"
+    out_filename = sanitize_filename(os.path.splitext(original_name)[0]) + out_ext
+
+    # Save uploaded file to temp location
+    tmp_input = tempfile.NamedTemporaryFile(delete=False, suffix=src_ext)
+    try:
+        content = await file.read()
+        tmp_input.write(content)
+        tmp_input.close()
+    except Exception as exc:
+        tmp_input.close()
+        os.unlink(tmp_input.name)
+        raise HTTPException(status_code=400, detail=f"Failed to read uploaded file: {exc}")
+
+    tmp_output = tempfile.NamedTemporaryFile(delete=False, suffix=out_ext)
+    tmp_output.close()
+
+    q: stdlib_queue.Queue = stdlib_queue.Queue()
+    user_id = user.id
+
+    def run_worker():
+        import subprocess
+        import sys as _sys
+
+        worker = os.path.join(os.path.dirname(__file__), "book_converter_worker.py")
+        stderr_lines: list[str] = []
+
+        try:
+            proc = subprocess.Popen(
+                [_sys.executable, worker, tmp_input.name, tmp_output.name, direction],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+
+            def _drain_stderr():
+                for ln in proc.stderr:
+                    stderr_lines.append(ln)
+
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if line.startswith("STATUS:"):
+                    q.put({"type": "status", "message": line[7:]})
+                elif line.startswith("ERROR:"):
+                    q.put({"type": "error", "message": line[6:]})
+                elif line == "DONE":
+                    q.put({"type": "_done_marker"})
+
+            proc.wait()
+            stderr_thread.join(timeout=5)
+
+            if proc.returncode != 0 and not any(
+                e["type"] in ("error", "_done_marker") for e in list(q.queue)
+            ):
+                err = "".join(stderr_lines[-30:]).strip() or "Conversion failed (non-zero exit)"
+                q.put({"type": "error", "message": err[-600:]})
+
+        except Exception as exc:
+            q.put({"type": "error", "message": str(exc)})
+        finally:
+            try:
+                os.unlink(tmp_input.name)
+            except OSError:
+                pass
+
+    threading.Thread(target=run_worker, daemon=True).start()
+
+    async def generate():
+        job_id = uuid.uuid4().hex[:12]
+        while True:
+            try:
+                event = q.get_nowait()
+            except stdlib_queue.Empty:
+                await asyncio.sleep(0.15)
+                continue
+
+            if event["type"] == "_done_marker":
+                if not os.path.isfile(tmp_output.name) or os.path.getsize(tmp_output.name) == 0:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Conversion produced no output'})}\n\n"
+                    break
+                try:
+                    _save_book_job(job_id, tmp_output.name, user_id, out_filename)
+                except OSError as exc:
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save result: {exc}'})}\n\n"
+                    break
+                yield f"data: {json.dumps({'type': 'done', 'job_id': job_id, 'filename': out_filename})}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(event)}\n\n"
+                if event["type"] == "error":
+                    try:
+                        os.unlink(tmp_output.name)
+                    except OSError:
+                        pass
+                    break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/book/download/{job_id}")
+def book_download(
+    job_id: str,
+    token: str | None = None,
+    user: User | None = Depends(get_current_user),
+):
+    if user is None and token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid = payload.get("sub")
+            if uid:
+                with Session(engine) as s:
+                    user = s.get(User, uid)
+        except JWTError:
+            pass
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    result = _get_book_job(job_id, user.id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Conversion job not found or expired")
+
+    file_path, filename = result
+    ext = os.path.splitext(filename)[1].lower()
+    media_type = "application/epub+zip" if ext == ".epub" else "application/pdf"
+    return FileResponse(file_path, media_type=media_type, filename=filename)
+
+
+# ---------------------------------------------------------------------------
 # Teams Transcript endpoint
 # ---------------------------------------------------------------------------
 _VTT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "vt_vtt_cache")

@@ -32,6 +32,14 @@ function HomePage({ onSelectTool }) {
         'Paste a Teams recording URL and download the meeting transcript as a clean VTT file — no manual steps needed.',
       tags: ['Teams', 'SharePoint', 'VTT'],
     },
+    {
+      id: 'bookconvert',
+      icon: '📚',
+      title: 'Book Format Converter',
+      description:
+        'Convert books between PDF and EPUB formats. Upload a file and download the converted version instantly.',
+      tags: ['PDF', 'EPUB', 'eBook'],
+    },
   ]
 
   return (
