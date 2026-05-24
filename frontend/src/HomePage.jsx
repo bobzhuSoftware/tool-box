@@ -40,6 +40,14 @@ function HomePage({ onSelectTool }) {
         'Convert books between PDF and EPUB formats. Upload a file and download the converted version instantly.',
       tags: ['PDF', 'EPUB', 'eBook'],
     },
+    {
+      id: 'wechat',
+      icon: '💬',
+      title: '微信聊天记录导出',
+      description:
+        '从本地微信中提取聊天记录，选择联系人或群聊后导出为 TXT 文件下载。需要微信正在运行。',
+      tags: ['WeChat', '聊天记录', 'Export'],
+    },
   ]
 
   return (

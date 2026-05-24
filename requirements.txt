@@ -11,3 +11,5 @@ playwright
 Pillow
 EbookLib
 PyMuPDF
+pycryptodome
+lz4

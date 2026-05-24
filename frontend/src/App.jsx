@@ -6,6 +6,7 @@ import WebToPdf from './WebToPdf'
 import WebToPdf2 from './WebToPdf2'
 import TeamsTranscript from './TeamsTranscript'
 import BookConverter from './BookConverter'
+import WechatExport from './WechatExport'
 
 function App() {
   // --- Auth state ---
@@ -127,6 +128,7 @@ function App() {
       {currentTool === 'webtopdf2' && <WebToPdf2 token={token} onAuthError={handleLogout} />}
       {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'bookconvert' && <BookConverter token={token} onAuthError={handleLogout} />}
+      {currentTool === 'wechat' && <WechatExport token={token} onAuthError={handleLogout} />}
     </div>
   )
 }
