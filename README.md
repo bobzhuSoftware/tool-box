@@ -126,3 +126,40 @@ python -m uvicorn server:app --reload
 | large  | 1550M     | Slowest | Best     |
 
 Start with `base` for quick results. Use `medium` or `large` for production-quality transcripts.
+
+## Discord Chat Export
+
+Exports a Discord server channel's chat history as a styled HTML file. No desktop client or bot API key required — only a browser session is needed.
+
+### How to Get Your Discord Token
+
+1. Open **discord.com** in your browser and log in
+2. Navigate to the channel you want to export
+3. Press `F12` to open DevTools
+4. Switch to the **Network** tab
+5. Click anywhere in Discord to trigger a network request
+6. Click any request in the list (e.g. one named `messages` or `channels`)
+7. In the **Headers** section, find the `Authorization` field and copy its value
+
+The token looks like: `MTExxx...` (a long string of characters).
+
+### How to Get the Channel URL
+
+Just copy the URL from the browser address bar while viewing the channel:
+
+```
+https://discord.com/channels/<guild_id>/<channel_id>
+```
+
+No need to manually extract the channel ID — paste the full URL and it is parsed automatically.
+
+### Usage
+
+1. Open the app and select **Discord 聊天记录导出**
+2. Paste your Discord token into the Token field
+3. Paste the channel URL into the URL field
+4. Optionally set a message limit (leave blank to export all messages)
+5. Click **开始导出** and wait for completion
+6. Click **下载 HTML 文件** to save the export
+
+> **Security note:** The token is sent only to this local server and is never stored persistently or forwarded to any third party. To invalidate a token, log out of all devices in Discord's account settings.

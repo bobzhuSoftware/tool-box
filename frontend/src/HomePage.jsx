@@ -48,6 +48,14 @@ function HomePage({ onSelectTool }) {
         '从本地微信中提取聊天记录，选择联系人或群聊后导出为 TXT 文件下载。需要微信正在运行。',
       tags: ['WeChat', '聊天记录', 'Export'],
     },
+    {
+      id: 'discord',
+      icon: '🎮',
+      title: 'Discord 聊天记录导出',
+      description:
+        '导出 Discord 服务器频道的聊天记录为 HTML 文件。粘贴频道 URL 和 Token 即可开始导出。',
+      tags: ['Discord', 'Chat Export', 'HTML'],
+    },
   ]
 
   return (
