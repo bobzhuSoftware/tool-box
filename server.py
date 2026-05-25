@@ -1617,6 +1617,8 @@ class DiscordExportRequest(BaseModel):
     token: str
     channel_url: str
     limit: int | None = None
+    start_date: str | None = None
+    end_date: str | None = None
 
 
 class DiscordTokenRequest(BaseModel):
@@ -1681,8 +1683,10 @@ async def discord_stream(req: DiscordExportRequest, user: User = Depends(require
 
         try:
             cmd = [_sys.executable, worker, req.token, channel_url, tmp.name]
-            if req.limit:
-                cmd.append(str(req.limit))
+            # Positional args: limit start_date end_date (empty string = omitted)
+            cmd.append(str(req.limit) if req.limit else "")
+            cmd.append(req.start_date.strip() if req.start_date else "")
+            cmd.append(req.end_date.strip() if req.end_date else "")
 
             proc = _sp.Popen(
                 cmd,

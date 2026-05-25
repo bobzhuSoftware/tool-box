@@ -116,11 +116,27 @@ def fetch_channel_info(channel_id: str, token: str) -> dict:
     return api_get(f"/channels/{channel_id}", token)
 
 
-def fetch_messages(channel_id: str, token: str, limit: int | None = None) -> list[dict]:
-    """Fetch all messages from a channel with pagination."""
+def date_to_snowflake(date_str: str, end_of_day: bool = False) -> str | None:
+    """Convert a YYYY-MM-DD date string to a Discord Snowflake ID."""
+    if not date_str:
+        return None
+    try:
+        dt = datetime.strptime(date_str.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if end_of_day:
+            dt = dt.replace(hour=23, minute=59, second=59)
+        DISCORD_EPOCH = 1420070400000
+        ms = int(dt.timestamp() * 1000)
+        return str((ms - DISCORD_EPOCH) << 22)
+    except ValueError:
+        return None
+
+
+def fetch_messages(channel_id: str, token: str, limit: int | None = None,
+                   after_snowflake: str | None = None, before_snowflake: str | None = None) -> list[dict]:
+    """Fetch messages from a channel with pagination and optional date filtering."""
     all_messages = []
-    before = None
-    batch_num = 0
+    # Start pagination from the end_date going backwards, or from the newest message
+    before = before_snowflake
 
     while True:
         endpoint = f"/channels/{channel_id}/messages?limit={MESSAGES_PER_REQUEST}"
@@ -131,9 +147,17 @@ def fetch_messages(channel_id: str, token: str, limit: int | None = None) -> lis
         if not batch:
             break
 
-        all_messages.extend(batch)
-        batch_num += 1
-        status(f"已获取 {len(all_messages)} 条消息...")
+        # If filtering by start date, stop once messages are older than after_snowflake
+        if after_snowflake:
+            filtered = [m for m in batch if int(m["id"]) > int(after_snowflake)]
+            all_messages.extend(filtered)
+            status(f"已获取 {len(all_messages)} 条消息...")
+            # If any message in batch was before the start date, we've gone far enough
+            if len(filtered) < len(batch):
+                break
+        else:
+            all_messages.extend(batch)
+            status(f"已获取 {len(all_messages)} 条消息...")
 
         if limit and len(all_messages) >= limit:
             all_messages = all_messages[:limit]
@@ -143,10 +167,8 @@ def fetch_messages(channel_id: str, token: str, limit: int | None = None) -> lis
             break
 
         before = batch[-1]["id"]
-        # Small delay between requests to be respectful
         time.sleep(0.5)
 
-    # Messages come in reverse chronological order, reverse for export
     all_messages.reverse()
     return all_messages
 
@@ -180,10 +202,19 @@ def get_avatar_url(author: dict) -> str:
     return f"https://cdn.discordapp.com/embed/avatars/{index}.png"
 
 
-def render_html(messages: list[dict], channel_info: dict, guild_name: str = "") -> str:
+def render_html(messages: list[dict], channel_info: dict, guild_name: str = "",
+                start_date: str = "", end_date: str = "") -> str:
     """Render messages to styled HTML resembling Discord's dark theme."""
     channel_name = channel_info.get("name", "unknown-channel")
     topic = channel_info.get("topic", "")
+
+    date_range = ""
+    if start_date and end_date:
+        date_range = f" · {start_date} 至 {end_date}"
+    elif start_date:
+        date_range = f" · {start_date} 之后"
+    elif end_date:
+        date_range = f" · {end_date} 之前"
 
     # Build user/channel lookup from message data
     user_map = {}  # user_id -> display_name
@@ -220,7 +251,7 @@ def render_html(messages: list[dict], channel_info: dict, guild_name: str = "") 
     ]
     if topic:
         html_parts.append(f'<p class="topic">{_escape_html(topic)}</p>')
-    html_parts.append(f'<p class="meta">Exported {len(messages)} messages on {datetime.now().strftime("%Y-%m-%d %H:%M")}</p>')
+    html_parts.append(f'<p class="meta">Exported {len(messages)} messages on {datetime.now().strftime("%Y-%m-%d %H:%M")}{_escape_html(date_range)}</p>')
     html_parts.append("</div>")
     html_parts.append('<div class="messages">')
 
@@ -531,12 +562,17 @@ body {
 
 def main():
     if len(sys.argv) < 4:
-        error("Usage: python discord_worker.py <token> <channel_url_or_id> <output_path> [limit]")
+        error("Usage: python discord_worker.py <token> <channel_url_or_id> <output_path> [limit] [start_date] [end_date]")
 
     token = sys.argv[1]
     channel_input = sys.argv[2]
     output_path = sys.argv[3]
     limit = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
+    start_date = sys.argv[5] if len(sys.argv) > 5 and sys.argv[5] else None
+    end_date = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else None
+
+    after_snowflake = date_to_snowflake(start_date, end_of_day=False) if start_date else None
+    before_snowflake = date_to_snowflake(end_date, end_of_day=True) if end_date else None
 
     status("正在解析频道信息...")
     channel_id = parse_channel_id(channel_input)
@@ -557,14 +593,23 @@ def main():
 
     status(f"频道: #{channel_name}" + (f" ({guild_name})" if guild_name else ""))
 
-    status("正在获取消息..." + (f" (最多 {limit} 条)" if limit else " (全部)"))
-    messages = fetch_messages(channel_id, token, limit)
+    date_range_desc = ""
+    if start_date and end_date:
+        date_range_desc = f" ({start_date} 至 {end_date})"
+    elif start_date:
+        date_range_desc = f" ({start_date} 之后)"
+    elif end_date:
+        date_range_desc = f" ({end_date} 之前)"
+    limit_desc = f"最多 {limit} 条" if limit else "全部"
+    status(f"正在获取消息... ({limit_desc}{date_range_desc})")
+
+    messages = fetch_messages(channel_id, token, limit, after_snowflake, before_snowflake)
 
     if not messages:
-        error("未找到任何消息。频道可能为空或无权限访问。")
+        error("未找到任何消息。频道可能为空、无权限访问，或指定时间段内没有消息。")
 
     status(f"共获取 {len(messages)} 条消息，正在生成 HTML...")
-    html = render_html(messages, channel_info, guild_name)
+    html = render_html(messages, channel_info, guild_name, start_date, end_date)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)

@@ -4,6 +4,8 @@ function DiscordExport({ token, onAuthError }) {
   const [discordToken, setDiscordToken] = useState('')
   const [channelUrl, setChannelUrl] = useState('')
   const [limit, setLimit] = useState('')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [progressLog, setProgressLog] = useState([])
   const [result, setResult] = useState(null)
@@ -58,6 +60,8 @@ function DiscordExport({ token, onAuthError }) {
           token: discordToken.trim(),
           channel_url: channelUrl.trim(),
           limit: limit ? parseInt(limit, 10) : null,
+          start_date: startDate || null,
+          end_date: endDate || null,
         }),
       })
 
@@ -203,6 +207,24 @@ function DiscordExport({ token, onAuthError }) {
 
         {/* Options row */}
         <div className="options-row">
+          <label>
+            起始日期（可选）
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              disabled={loading}
+            />
+          </label>
+          <label>
+            截止日期（可选）
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              disabled={loading}
+            />
+          </label>
           <label>
             消息数量上限（可选）
             <input
