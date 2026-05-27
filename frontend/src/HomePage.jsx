@@ -1,4 +1,7 @@
+import { useState } from 'react'
+
 function HomePage({ onSelectTool }) {
+  const [query, setQuery] = useState('')
   const tools = [
     {
       id: 'transcript',
@@ -58,13 +61,41 @@ function HomePage({ onSelectTool }) {
     },
   ]
 
+  const q = query.trim().toLowerCase()
+  const filtered = q
+    ? tools.filter(
+        (t) =>
+          t.title.toLowerCase().includes(q) ||
+          t.description.toLowerCase().includes(q) ||
+          t.tags.some((tag) => tag.toLowerCase().includes(q))
+      )
+    : tools
+
   return (
     <div className="home-page">
       <div className="home-intro">
         <p>Choose a tool to get started.</p>
       </div>
+      <div className="home-search-bar">
+        <span className="home-search-icon">🔍</span>
+        <input
+          type="text"
+          className="home-search-input"
+          placeholder="Filter tools..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query && (
+          <button className="home-search-clear" onClick={() => setQuery('')} aria-label="Clear">
+            ✕
+          </button>
+        )}
+      </div>
       <div className="tools-grid">
-        {tools.map((tool) => (
+        {filtered.length === 0 && (
+          <p className="home-no-results">No tools match &ldquo;{query}&rdquo;.</p>
+        )}
+        {filtered.map((tool) => (
           <div
             key={tool.id}
             className="tool-card"
