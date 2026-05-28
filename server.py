@@ -250,6 +250,7 @@ class TranscribeRequest(BaseModel):
     url: str
     model: str = "base"
     language: str | None = None
+    mode: str = "auto"  # "auto" | "captions" | "whisper"
 
 
 class TranscribeResponse(BaseModel):
@@ -360,6 +361,172 @@ def _count_words(text: str) -> int:
     if cjk > len(text) * 0.3:
         return cjk
     return len(text.split())
+
+
+# ---------------------------------------------------------------------------
+# Subtitle / Caption extraction helpers
+# ---------------------------------------------------------------------------
+
+class CaptionsNotFoundError(Exception):
+    """Raised when no captions/subtitles are available for a video."""
+
+
+def _parse_vtt(content: str) -> list[dict]:
+    """
+    Parse a WebVTT subtitle file into Whisper-compatible segment dicts.
+
+    Returns: [{"start": float, "end": float, "text": str}, ...]
+
+    Handles:
+    - YouTube timing tags like <c>, <00:00:00.000>
+    - HTML tags
+    - Consecutive duplicate cue blocks (YouTube auto-caption overlap)
+    """
+    # Strip YouTube timing/colour tags and HTML
+    content = re.sub(r'<[^>]+>', '', content)
+
+    cue_re = re.compile(
+        r'(\d{1,2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{3})[^\n]*\n'
+        r'((?:(?!\d{1,2}:\d{2}:\d{2}).*\n?)*)',
+        re.MULTILINE,
+    )
+
+    def ts_to_sec(ts: str) -> float:
+        ts = ts.replace(',', '.')
+        parts = ts.split(':')
+        h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+        return h * 3600 + m * 60 + s
+
+    segments: list[dict] = []
+    prev_text: str = ''
+    for m in cue_re.finditer(content):
+        start_s = ts_to_sec(m.group(1))
+        end_s   = ts_to_sec(m.group(2))
+        text    = m.group(3).strip()
+        if not text or text == prev_text:
+            continue
+        # Skip WebVTT NOTE blocks and header lines
+        if text.upper().startswith('NOTE') or text.upper().startswith('WEBVTT'):
+            continue
+        segments.append({"start": start_s, "end": end_s, "text": text})
+        prev_text = text
+
+    return segments
+
+
+def _suppress_cookie_save(ydl: yt_dlp.YoutubeDL) -> None:
+    """Prevent yt-dlp from writing back the cookie file on Windows.
+
+    yt-dlp calls cookiejar.save() inside __exit__, which can raise
+    [Errno 13] Permission denied on Windows (Defender scanning the file).
+    We only need to *read* cookies, never write them back.
+    """
+    if getattr(ydl, 'cookiejar', None) is not None:
+        ydl.cookiejar.save = lambda *a, **kw: None
+
+
+def _extract_captions(
+    url: str,
+    language_pref: str | None,
+    tmp_dir: str,
+    q: stdlib_queue.Queue,
+) -> tuple[list[dict], str, str]:
+    """
+    Try to extract existing subtitles/captions from a video URL using yt-dlp.
+
+    Returns: (raw_segments, detected_lang, video_title)
+    Raises:  CaptionsNotFoundError if no captions are available.
+
+    Strategy (two lightweight calls, cookie write-back suppressed on both):
+      1. extract_info(download=False) — metadata only, no subtitle downloads.
+         Determine which language to fetch.
+      2. extract_info(download=True) — download only the ONE chosen language.
+         Using ["all"] is avoided because it fires dozens of HTTP requests
+         and triggers YouTube's HTTP 429 rate-limiting.
+    """
+    import glob as _glob
+
+    # ------------------------------------------------------------------
+    # Step 1: metadata only — discover available subtitle languages.
+    # ------------------------------------------------------------------
+    q.put({"type": "status", "message": "Checking for available captions..."})
+
+    info_opts: dict = {"quiet": True, "skip_download": True}
+    _apply_cookies(info_opts)
+    with yt_dlp.YoutubeDL(info_opts) as ydl:
+        _suppress_cookie_save(ydl)
+        info = ydl.extract_info(url, download=False)
+
+    video_title     = sanitize_filename((info or {}).get("title", "transcript"))
+    subtitles: dict     = (info or {}).get("subtitles", {}) or {}
+    auto_captions: dict = (info or {}).get("automatic_captions", {}) or {}
+
+    # Filter out non-subtitle tracks that yt-dlp exposes in the subtitles dict
+    # but cannot be downloaded as VTT (e.g. live_chat replay).
+    _NON_SUBTITLE_TRACKS = {'live_chat', 'live_chat_replay'}
+    manual_langs = set(subtitles.keys()) - _NON_SUBTITLE_TRACKS
+    auto_langs   = set(auto_captions.keys()) - _NON_SUBTITLE_TRACKS
+
+    if not manual_langs and not auto_langs:
+        raise CaptionsNotFoundError("No subtitles or automatic captions found for this video.")
+
+    # Choose the best language (manual preferred over auto).
+    def _pick(pool: set[str]) -> str | None:
+        if language_pref and language_pref in pool:
+            return language_pref
+        if language_pref:
+            base = language_pref.split('-')[0]
+            for k in pool:
+                if k.startswith(base):
+                    return k
+        if 'en' in pool:
+            return 'en'
+        return next(iter(sorted(pool)), None)
+
+    chosen_lang: str
+    is_auto: bool
+    picked = _pick(manual_langs)
+    if picked:
+        chosen_lang, is_auto = picked, False
+    else:
+        picked = _pick(auto_langs)
+        if picked:
+            chosen_lang, is_auto = picked, True
+        else:
+            raise CaptionsNotFoundError("No suitable subtitle language found.")
+
+    source_label = "automatic captions" if is_auto else "manual subtitles"
+    q.put({"type": "status", "message": f"Found {source_label} in '{chosen_lang}' — downloading..."})
+
+    # ------------------------------------------------------------------
+    # Step 2: download ONLY the chosen language — avoids 429 rate-limiting.
+    # ------------------------------------------------------------------
+    dl_opts: dict = {
+        "quiet": True,
+        "skip_download": True,
+        "writesubtitles": not is_auto,
+        "writeautomaticsub": is_auto,
+        "subtitleslangs": [chosen_lang],
+        "subtitlesformat": "vtt",
+        "outtmpl": os.path.join(tmp_dir, "sub.%(ext)s"),
+    }
+    _apply_cookies(dl_opts)
+    with yt_dlp.YoutubeDL(dl_opts) as ydl:
+        _suppress_cookie_save(ydl)
+        ydl.download([url])
+
+    vtt_files = _glob.glob(os.path.join(tmp_dir, "*.vtt"))
+    if not vtt_files:
+        raise CaptionsNotFoundError("Subtitle file was not downloaded (unexpected yt-dlp behaviour).")
+
+    vtt_content = open(vtt_files[0], encoding="utf-8", errors="replace").read()
+    raw_segments = _parse_vtt(vtt_content)
+
+    if not raw_segments:
+        raise CaptionsNotFoundError("Subtitle file was empty or could not be parsed.")
+
+    return raw_segments, chosen_lang, video_title
+
 
 
 def merge_segments(
@@ -529,71 +696,120 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
 
     def worker():
         try:
-            q.put({"type": "status", "message": "Starting download..."})
+            mode = req.mode  # "auto" | "captions" | "whisper"
 
             with tempfile.TemporaryDirectory() as tmp_dir:
-                output_template = os.path.join(tmp_dir, "audio.%(ext)s")
 
-                def progress_hook(d):
-                    if d["status"] == "downloading":
-                        percent = d.get("_percent_str", "?%").strip()
-                        speed = d.get("_speed_str", "").strip()
-                        eta = d.get("_eta_str", "").strip()
-                        msg = f"Downloading audio: {percent}"
-                        if speed and speed not in ("", "N/A"):
-                            msg += f" at {speed}"
-                        if eta and eta not in ("", "N/A"):
-                            msg += f" — ETA {eta}"
-                        q.put({"type": "progress", "message": msg})
-                    elif d["status"] == "finished":
-                        q.put({"type": "status", "message": "Download complete, converting to MP3..."})
-                    elif d["status"] == "error":
-                        q.put({"type": "error", "message": "Download error occurred"})
+                # ----------------------------------------------------------
+                # Helper: run Whisper pipeline
+                # ----------------------------------------------------------
+                def run_whisper(title_hint: str = "transcript") -> tuple[list[dict], str, str]:
+                    output_template = os.path.join(tmp_dir, "audio.%(ext)s")
 
-                ydl_opts = {
-                    "format": "bestaudio/best",
-                    "postprocessors": [
-                        {
-                            "key": "FFmpegExtractAudio",
-                            "preferredcodec": "mp3",
-                            "preferredquality": "192",
-                        }
-                    ],
-                    "outtmpl": output_template,
-                    "quiet": True,
-                    "progress_hooks": [progress_hook],
-                }
-                if FFMPEG_LOCATION:
-                    ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+                    def progress_hook(d):
+                        if d["status"] == "downloading":
+                            percent = d.get("_percent_str", "?%").strip()
+                            speed = d.get("_speed_str", "").strip()
+                            eta = d.get("_eta_str", "").strip()
+                            msg = f"Downloading audio: {percent}"
+                            if speed and speed not in ("", "N/A"):
+                                msg += f" at {speed}"
+                            if eta and eta not in ("", "N/A"):
+                                msg += f" — ETA {eta}"
+                            q.put({"type": "progress", "message": msg})
+                        elif d["status"] == "finished":
+                            q.put({"type": "status", "message": "Download complete, converting to MP3..."})
+                        elif d["status"] == "error":
+                            q.put({"type": "error", "message": "Download error occurred"})
 
-                video_title = "transcript"
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(req.url, download=False)
-                    if info:
-                        video_title = sanitize_filename(info.get("title", "transcript"))
-                        q.put({"type": "status", "message": f"Video: {video_title}"})
-                    ydl.download([req.url])
+                    q.put({"type": "status", "message": "Starting audio download..."})
+                    ydl_opts = {
+                        "format": "bestaudio/best",
+                        "postprocessors": [
+                            {
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": "192",
+                            }
+                        ],
+                        "outtmpl": output_template,
+                        "quiet": True,
+                        "progress_hooks": [progress_hook],
+                    }
+                    if FFMPEG_LOCATION:
+                        ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+                    _apply_cookies(ydl_opts)
 
-                audio_path = os.path.join(tmp_dir, "audio.mp3")
-                if not os.path.exists(audio_path):
-                    raise FileNotFoundError("Audio file not found after download. Is FFmpeg installed?")
+                    video_title_w = title_hint
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(req.url, download=False)
+                        if info:
+                            video_title_w = sanitize_filename(info.get("title", "transcript"))
+                            q.put({"type": "status", "message": f"Video: {video_title_w}"})
+                        ydl.download([req.url])
 
-                q.put({"type": "status", "message": f"Loading Whisper model '{req.model}'..."})
-                model = whisper.load_model(req.model)
+                    audio_path = os.path.join(tmp_dir, "audio.mp3")
+                    if not os.path.exists(audio_path):
+                        raise FileNotFoundError("Audio file not found after download. Is FFmpeg installed?")
 
-                q.put({"type": "status", "message": "Transcribing audio... (this may take several minutes)"})
-                options = {}
-                if req.language:
-                    options["language"] = req.language
-                result = model.transcribe(audio_path, **options)
+                    q.put({"type": "status", "message": f"Loading Whisper model '{req.model}'..."})
+                    whisper_model = whisper.load_model(req.model)
+
+                    q.put({"type": "status", "message": "Transcribing audio... (this may take several minutes)"})
+                    options: dict = {}
+                    if req.language:
+                        options["language"] = req.language
+                    result = whisper_model.transcribe(audio_path, **options)
+
+                    segs = merge_segments(result["segments"])
+                    lang = result.get("language", "unknown")
+                    return segs, lang, video_title_w
+
+                # ----------------------------------------------------------
+                # Route by mode
+                # ----------------------------------------------------------
+                source: str  # "captions" or "whisper"
+                segments: list[dict]
+                detected_lang: str
+                video_title: str
+
+                if mode == "captions":
+                    # Captions only — fail loudly if none found
+                    raw_segs, detected_lang, video_title = _extract_captions(
+                        req.url, req.language, tmp_dir, q
+                    )
+                    segments = merge_segments(raw_segs)
+                    source = "captions"
+
+                elif mode == "whisper":
+                    # Whisper only — existing behaviour
+                    segments, detected_lang, video_title = run_whisper()
+                    source = "whisper"
+
+                else:
+                    # mode == "auto" — try captions first, fall back to Whisper
+                    try:
+                        raw_segs, detected_lang, video_title = _extract_captions(
+                            req.url, req.language, tmp_dir, q
+                        )
+                        segments = merge_segments(raw_segs)
+                        source = "captions"
+                    except CaptionsNotFoundError as exc:
+                        q.put({"type": "status", "message": f"No captions found ({exc}). Falling back to Whisper AI transcription..."})
+                        segments, detected_lang, video_title = run_whisper()
+                        source = "whisper"
+
+                # ----------------------------------------------------------
+                # Post-process and save
+                # ----------------------------------------------------------
+                full_text_parts: list[str] = []
+                for seg in segments:
+                    seg["text"] = to_simplified(seg["text"], detected_lang)
+                    full_text_parts.append(seg["text"])
+                full_text = "\n".join(full_text_parts)
 
             job_id = uuid.uuid4().hex[:12]
-            segments = merge_segments(result["segments"])
-
-            detected_lang = result.get("language", "unknown")
-            full_text = to_simplified(result["text"].strip(), detected_lang)
-            for seg in segments:
-                seg["text"] = to_simplified(seg["text"], detected_lang)
+            db_model = "captions" if source == "captions" else req.model
 
             jobs[job_id] = {
                 "text": full_text,
@@ -608,7 +824,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                 title=video_title,
                 url=req.url,
                 language=detected_lang,
-                model=req.model,
+                model=db_model,
                 text=full_text,
                 segments=segments,
                 user_id=user_id,
@@ -621,6 +837,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                 "language": detected_lang,
                 "segments": segments,
                 "title": video_title,
+                "source": source,
             })
 
         except Exception as e:

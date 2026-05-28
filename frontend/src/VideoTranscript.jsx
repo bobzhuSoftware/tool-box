@@ -16,6 +16,7 @@ function VideoTranscript({ token, onAuthError }) {
   const fileInputRef = useRef(null)
   const [model, setModel] = useState('base')
   const [language, setLanguage] = useState('')
+  const [transcribeMode, setTranscribeMode] = useState('auto')
 
   const PLATFORMS = {
     youtube: {
@@ -89,7 +90,7 @@ function VideoTranscript({ token, onAuthError }) {
           body: formData,
         })
       } else {
-        const body = { url: url.trim(), model }
+        const body = { url: url.trim(), model, mode: transcribeMode }
         if (language.trim()) body.language = language.trim()
         response = await fetch('/api/transcribe/stream', {
           method: 'POST',
@@ -121,7 +122,10 @@ function VideoTranscript({ token, onAuthError }) {
                 const event = JSON.parse(line.slice(6))
                 if (event.type === 'done') {
                   setResult(event)
-                  addLog({ type: 'done', message: `Transcription complete! Detected language: ${event.language}` })
+                  const doneMsg = event.source === 'captions'
+                    ? `Extracted from existing captions! Detected language: ${event.language}`
+                    : `Transcription complete! Detected language: ${event.language}`
+                  addLog({ type: 'done', message: doneMsg })
                   fetchHistory()
                 } else {
                   addLog(event)
@@ -262,17 +266,43 @@ function VideoTranscript({ token, onAuthError }) {
           </>
         )}
 
+        {/* Transcription mode selector — only relevant for URL input, not file upload */}
+        {inputMode === 'url' && (
+          <div className="options-row">
+            <label>Mode</label>
+            <div className="platform-toggle">
+              {[{ id: 'auto', label: '⚡ Auto' }, { id: 'captions', label: '📄 Captions' }, { id: 'whisper', label: '🤖 Whisper' }].map(({ id, label }) => (
+                <button
+                  key={id}
+                  className={`platform-btn ${transcribeMode === id ? 'active' : ''}`}
+                  onClick={() => setTranscribeMode(id)}
+                  disabled={loading}
+                  title={{
+                    auto: 'Try captions first, fall back to AI if not available',
+                    captions: 'Extract existing subtitles directly (fast)',
+                    whisper: 'Always use Whisper AI transcription',
+                  }[id]}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="options-row">
-          <label>
-            Model
-            <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loading}>
-              <option value="tiny">tiny (fastest)</option>
-              <option value="base">base (default)</option>
-              <option value="small">small</option>
-              <option value="medium">medium</option>
-              <option value="large">large (best)</option>
-            </select>
-          </label>
+          {transcribeMode !== 'captions' && (
+            <label>
+              Model
+              <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loading}>
+                <option value="tiny">tiny (fastest)</option>
+                <option value="base">base (default)</option>
+                <option value="small">small</option>
+                <option value="medium">medium</option>
+                <option value="large">large (best)</option>
+              </select>
+            </label>
+          )}
           <label>
             Language (optional)
             <input
