@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 import queue as stdlib_queue
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import unicodedata
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -355,6 +357,12 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _ts_to_seconds(ts: str) -> int:
+    """Convert 'HH:MM:SS' timestamp string back to total seconds."""
+    parts = ts.split(':')
+    return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+
+
 def _count_words(text: str) -> int:
     """Count words in a language-aware way (CJK chars count individually)."""
     cjk = sum(1 for c in text if unicodedata.east_asian_width(c) in ('W', 'F'))
@@ -640,7 +648,7 @@ def delete_history(job_id: str, user: User = Depends(require_user)):
 
 
 @app.get("/api/download/{job_id}")
-def download_transcript(job_id: str, timestamps: bool = True, token: str | None = None, user: User | None = Depends(get_current_user)):
+def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int = 0, token: str | None = None, user: User | None = Depends(get_current_user)):
     # Support token as query param for browser window.open() downloads
     if user is None and token:
         try:
@@ -666,17 +674,65 @@ def download_transcript(job_id: str, timestamps: bool = True, token: str | None 
                 "segments": json.loads(record.segments_json),
             }
 
+    title = job.get("title", "transcript")
+    segments = job["segments"]
+
+    def render_chunk(chunk_segs: list[dict]) -> str:
+        if timestamps:
+            return "".join(
+                f"[{s['start']} -> {s['end']}]  {s['text']}\n" for s in chunk_segs
+            )
+        return " ".join(s["text"] for s in chunk_segs) + "\n"
+
+    # ------------------------------------------------------------------ #
+    # Chunked download: split segments into N-minute blocks → ZIP file    #
+    # ------------------------------------------------------------------ #
+    if chunk_minutes > 0:
+        chunk_secs = chunk_minutes * 60
+        chunks: list[list[dict]] = []
+        current_chunk: list[dict] = []
+        chunk_start_sec: float = 0.0
+
+        for seg in segments:
+            # Start a new chunk when the segment's start time has crossed
+            # another chunk_secs boundary relative to the first segment.
+            seg_start = _ts_to_seconds(seg["start"])
+            if not current_chunk:
+                chunk_start_sec = seg_start
+
+            if current_chunk and (seg_start - chunk_start_sec) >= chunk_secs:
+                chunks.append(current_chunk)
+                current_chunk = []
+                chunk_start_sec = seg_start
+
+            current_chunk.append(seg)
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        zip_buffer = io.BytesIO()
+        total = len(chunks)
+        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for i, chunk_segs in enumerate(chunks, 1):
+                part_name = f"{title}_part{i:02d}_of{total:02d}.txt"
+                zf.writestr(part_name, render_chunk(chunk_segs))
+        zip_buffer.seek(0)
+        zip_filename = f"{title}_split{chunk_minutes}min.zip"
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+        )
+
+    # ------------------------------------------------------------------ #
+    # Single-file download (original behaviour)                           #
+    # ------------------------------------------------------------------ #
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
     )
     try:
-        if timestamps:
-            for seg in job["segments"]:
-                tmp.write(f"[{seg['start']} -> {seg['end']}]  {seg['text']}\n")
-        else:
-            tmp.write(job["text"] + "\n")
+        tmp.write(render_chunk(segments))
         tmp.close()
-        title = job.get("title", "transcript")
         filename = f"{title}.txt"
         return FileResponse(
             tmp.name,

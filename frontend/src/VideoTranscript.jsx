@@ -142,10 +142,39 @@ function VideoTranscript({ token, onAuthError }) {
     }
   }
 
-  const handleDownload = (jobId, withTimestamps) => {
+  const handleDownload = async (jobId, withTimestamps, chunkMinutes = 0) => {
     const ts = withTimestamps ? 'true' : 'false'
-    const authParam = token ? `&token=${encodeURIComponent(token)}` : ''
-    window.open(`/api/download/${jobId}?timestamps=${ts}${authParam}`, '_blank')
+    const chunkParam = chunkMinutes > 0 ? `&chunk_minutes=${chunkMinutes}` : ''
+
+    if (chunkMinutes > 0) {
+      // ZIP binary — must use fetch+Blob; window.open can't reliably trigger
+      // a binary download and some browsers display the raw bytes as text.
+      try {
+        const authParam = token ? `&token=${encodeURIComponent(token)}` : ''
+        const res = await fetch(
+          `/api/download/${jobId}?timestamps=${ts}${chunkParam}${authParam}`,
+          { headers: authHeaders() }
+        )
+        if (!res.ok) throw new Error(`Server error ${res.status}`)
+        const blob = await res.blob()
+        const blobUrl = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = blobUrl
+        const disposition = res.headers.get('content-disposition') || ''
+        const nameMatch = disposition.match(/filename="([^"]+)"/)
+        a.download = nameMatch ? nameMatch[1] : `transcript_split${chunkMinutes}min.zip`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(blobUrl)
+      } catch (err) {
+        alert('Download failed: ' + err.message)
+      }
+    } else {
+      // Plain text — window.open is fine
+      const authParam = token ? `&token=${encodeURIComponent(token)}` : ''
+      window.open(`/api/download/${jobId}?timestamps=${ts}${authParam}`, '_blank')
+    }
   }
 
   const handleDelete = async (jobId) => {
@@ -358,6 +387,10 @@ function VideoTranscript({ token, onAuthError }) {
             <button className="btn-outline" onClick={() => handleDownload(result.job_id, false)}>
               Download plain text
             </button>
+            <button className="btn-outline" onClick={() => handleDownload(result.job_id, true, 30)}
+              title="Download as a ZIP of multiple files, each covering 30 minutes">
+              ✂ Split by 30 min (ZIP)
+            </button>
           </div>
         </div>
       )}
@@ -385,6 +418,10 @@ function VideoTranscript({ token, onAuthError }) {
                   </button>
                   <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, false)}>
                     ↓ Plain
+                  </button>
+                  <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, true, 30)}
+                    title="Download as a ZIP of multiple files, each covering 30 minutes">
+                    ✂ Split
                   </button>
                   <button className="btn-sm btn-danger" onClick={() => handleDelete(item.job_id)}>
                     ✕
