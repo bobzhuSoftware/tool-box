@@ -201,6 +201,7 @@ async def run(url: str, output_path: str):
     from playwright.async_api import async_playwright
 
     transcript_meta: dict = {}
+    captured_api_urls: list = []
 
     # Copy profile to temp dir so Edge can stay open
     status("Preparing browser session…")
@@ -218,17 +219,40 @@ async def run(url: str, output_path: str):
 
             async def on_response(response):
                 rurl = response.url
-                if "_api" in rurl and "v2.1" in rurl and "content" not in rurl:
+                # Broad filter: any JSON API response that might contain transcript info
+                is_api = ("_api" in rurl or "api/" in rurl) and "content" not in rurl.split("?")[0]
+                is_transcript_url = "transcript" in rurl.lower()
+                if is_api or is_transcript_url:
+                    captured_api_urls.append(rurl[:200])
                     try:
+                        ct = response.headers.get("content-type", "")
+                        if "json" not in ct and "octet" not in ct:
+                            return
                         body = await response.body()
-                        if len(body) > 50 and not body[:5].startswith(b"<"):
-                            try:
-                                data = json.loads(body)
-                            except Exception:
-                                return
-                            transcripts = data.get("media", {}).get("transcripts", [])
-                            if transcripts:
-                                transcript_meta.update(transcripts[0])
+                        if len(body) < 50:
+                            return
+                        try:
+                            data = json.loads(body)
+                        except Exception:
+                            return
+                        # Standard path: media.transcripts[]
+                        transcripts = data.get("media", {}).get("transcripts", [])
+                        if transcripts and not transcript_meta:
+                            transcript_meta.update(transcripts[0])
+                            return
+                        # Alternative: transcripts at top level (value array)
+                        if isinstance(data.get("value"), list):
+                            for item in data["value"]:
+                                if item.get("@odata.type", "").endswith("transcript") or \
+                                   "temporaryDownloadUrl" in item or \
+                                   ("displayName" in item and item.get("languageTag")):
+                                    if not transcript_meta:
+                                        transcript_meta.update(item)
+                                    return
+                        # Alternative: direct transcript object
+                        if "temporaryDownloadUrl" in data and "displayName" in data:
+                            if not transcript_meta:
+                                transcript_meta.update(data)
                     except Exception:
                         pass
 
@@ -240,7 +264,7 @@ async def run(url: str, output_path: str):
             except Exception:
                 pass
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
             actual_url = page.url
             if "login" in actual_url.lower() or "microsoftonline" in actual_url.lower():
                 print("ERROR:Authentication required — Edge session may have expired.", flush=True)
@@ -251,15 +275,158 @@ async def run(url: str, output_path: str):
                 await ctx.close()
                 return
 
+            # Try to trigger transcript loading by clicking transcript/CC buttons
+            status("Looking for transcript panel…")
+            try:
+                # Wait for the page to stabilize
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+
+            # Try various selectors that SharePoint Stream uses for transcript buttons
+            transcript_selectors = [
+                'button[aria-label*="Transcript" i]',
+                'button[aria-label*="transcript" i]',
+                'button[data-automationid*="transcript" i]',
+                'button[title*="Transcript" i]',
+                '[role="tab"][aria-label*="Transcript" i]',
+                'button:has-text("Transcript")',
+                'button[aria-label*="字幕" i]',
+                'button[aria-label*="CC" i]',
+                'button[aria-label*="captions" i]',
+                '[data-automation-id*="transcript" i]',
+            ]
+            clicked = False
+            # Retry button search up to 3 times with increasing waits
+            for attempt in range(3):
+                for sel in transcript_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.is_visible(timeout=2000):
+                            await btn.click()
+                            clicked = True
+                            status("Clicked transcript button, waiting for data…")
+                            await asyncio.sleep(3)
+                            break
+                    except Exception:
+                        continue
+                if clicked or transcript_meta:
+                    break
+                # Wait before retrying
+                await asyncio.sleep(2)
+
+            if not clicked and not transcript_meta:
+                # Try clicking the "more actions" or panel toggle as fallback
+                try:
+                    # Some versions have a side panel toggle
+                    panel_btn = page.locator('[aria-label*="panel" i], [aria-label*="details" i]').first
+                    if await panel_btn.is_visible(timeout=1000):
+                        await panel_btn.click()
+                        await asyncio.sleep(2)
+                except Exception:
+                    pass
+
             status("Waiting for transcript metadata…")
-            for i in range(40):
+            for i in range(30):
                 await asyncio.sleep(1)
                 if transcript_meta:
                     break
                 if i % 10 == 9:
                     status(f"Still waiting… ({i+1}s)")
 
+            # Fallback: extract driveId/itemId from captured URLs and call transcript API directly
             if not transcript_meta:
+                status("Trying direct transcript API query…")
+                # Extract drive and item IDs from captured API URLs
+                drive_item_re = re.compile(r'/drives/([^/]+)/items/([^/?]+)')
+                drive_id = None
+                item_id = None
+                base_url = None
+                for u in captured_api_urls:
+                    m = drive_item_re.search(u)
+                    if m:
+                        drive_id = m.group(1)
+                        item_id = m.group(2)
+                        # Extract base URL (protocol + host + path prefix before /drives/)
+                        idx = u.index('/drives/')
+                        # Find the API root (e.g. https://host/_api_cached/v2.1)
+                        base_url = u[:idx]
+                        break
+
+                if drive_id and item_id and base_url:
+                    status(f"Found drive/item IDs, querying transcript API…")
+                    try:
+                        api_result = await page.evaluate("""
+                            async (args) => {
+                                const { baseUrl, driveId, itemId } = args;
+                                // Try multiple API patterns for transcript discovery
+                                const urls = [
+                                    `${baseUrl}/drives/${driveId}/items/${itemId}?$select=id,name,media&$expand=media`,
+                                    `${baseUrl}/drives/${driveId}/items/${itemId}?select=id,name,media&expand=media`,
+                                ];
+                                for (const url of urls) {
+                                    try {
+                                        const resp = await fetch(url, { credentials: 'include' });
+                                        if (resp.ok) {
+                                            const data = await resp.json();
+                                            const transcripts = data?.media?.transcripts;
+                                            if (transcripts && transcripts.length > 0) {
+                                                return transcripts[0];
+                                            }
+                                        }
+                                    } catch(e) {}
+                                }
+                                return null;
+                            }
+                        """, {"baseUrl": base_url, "driveId": drive_id, "itemId": item_id})
+                        if api_result and isinstance(api_result, dict):
+                            transcript_meta.update(api_result)
+                            status("Got transcript metadata via direct API call")
+                    except Exception as e:
+                        status(f"Direct API query failed: {e}")
+                else:
+                    status("Could not extract drive/item IDs from captured URLs")
+
+            # Second fallback: try scrolling/interacting to trigger lazy API calls
+            if not transcript_meta:
+                status("Attempting to trigger transcript load via UI interaction…")
+                try:
+                    # Click anywhere on the video player to ensure it's active
+                    player = page.locator('video, [class*="player" i], [class*="Player" i]').first
+                    if await player.is_visible(timeout=2000):
+                        await player.click()
+                        await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+                # Try right-click context menu or kebab menu
+                try:
+                    kebab = page.locator('[aria-label*="More" i], [aria-label*="更多" i], [class*="kebab" i]').first
+                    if await kebab.is_visible(timeout=1000):
+                        await kebab.click()
+                        await asyncio.sleep(1)
+                        # Look for transcript option in menu
+                        menu_item = page.locator('[role="menuitem"]:has-text("Transcript"), [role="menuitem"]:has-text("字幕")').first
+                        if await menu_item.is_visible(timeout=1000):
+                            await menu_item.click()
+                            await asyncio.sleep(3)
+                except Exception:
+                    pass
+
+                # Final wait
+                for i in range(10):
+                    await asyncio.sleep(1)
+                    if transcript_meta:
+                        break
+
+            if not transcript_meta:
+                # Log diagnostic info for debugging
+                if captured_api_urls:
+                    status(f"Debug: captured {len(captured_api_urls)} API responses but none contained transcript data")
+                    for u in captured_api_urls[:5]:
+                        status(f"  API: {u}")
+                else:
+                    status("Debug: no API responses were captured at all — page may not have loaded correctly")
                 print("ERROR:No transcript found for this recording. It may not have been transcribed.", flush=True)
                 await ctx.close()
                 return
