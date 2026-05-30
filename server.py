@@ -675,6 +675,10 @@ def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int
             }
 
     title = job.get("title", "transcript")
+    # Sanitize title for use in HTTP headers (must be latin-1 encodable)
+    title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    if not title:
+        title = "transcript"
     segments = job["segments"]
 
     def render_chunk(chunk_segs: list[dict]) -> str:
