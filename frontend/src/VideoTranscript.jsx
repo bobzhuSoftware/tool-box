@@ -161,8 +161,12 @@ function VideoTranscript({ token, onAuthError }) {
         const a = document.createElement('a')
         a.href = blobUrl
         const disposition = res.headers.get('content-disposition') || ''
-        const nameMatch = disposition.match(/filename="([^"]+)"/)
-        a.download = nameMatch ? nameMatch[1] : `transcript_split${chunkMinutes}min.zip`
+        const rfc5987Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+        const asciiMatch = disposition.match(/filename="([^"]+)"/)
+        const rawName = rfc5987Match
+          ? decodeURIComponent(rfc5987Match[1].trim())
+          : asciiMatch ? asciiMatch[1] : `transcript_split${chunkMinutes}min.zip`
+        a.download = rawName
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)

@@ -12,10 +12,10 @@ import unicodedata
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 import bcrypt as _bcrypt
@@ -675,11 +675,7 @@ def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int
                 "segments": json.loads(record.segments_json),
             }
 
-    title = job.get("title", "transcript")
-    # Sanitize title for use in HTTP headers (must be latin-1 encodable)
-    title = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
-    if not title:
-        title = "transcript"
+    title = sanitize_filename(job.get("title", "transcript")) or "transcript"
     segments = job["segments"]
 
     def render_chunk(chunk_segs: list[dict]) -> str:
@@ -721,12 +717,13 @@ def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int
             for i, chunk_segs in enumerate(chunks, 1):
                 part_name = f"{title}_part{i:02d}_of{total:02d}.txt"
                 zf.writestr(part_name, render_chunk(chunk_segs))
-        zip_buffer.seek(0)
         zip_filename = f"{title}_split{chunk_minutes}min.zip"
-        return StreamingResponse(
-            zip_buffer,
+        ascii_zip = zip_filename.encode("ascii", "ignore").decode("ascii") or "transcript.zip"
+        encoded_zip = quote(zip_filename, safe="")
+        return Response(
+            content=zip_buffer.getvalue(),
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+            headers={"Content-Disposition": f'attachment; filename="{ascii_zip}"; filename*=UTF-8\'\'{encoded_zip}'},
         )
 
     # ------------------------------------------------------------------ #
@@ -739,10 +736,12 @@ def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int
         tmp.write(render_chunk(segments))
         tmp.close()
         filename = f"{title}.txt"
+        ascii_name = filename.encode("ascii", "ignore").decode("ascii") or "transcript.txt"
+        encoded_name = quote(filename, safe="")
         return FileResponse(
             tmp.name,
             media_type="text/plain",
-            filename=filename,
+            headers={"Content-Disposition": f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded_name}'},
         )
     except Exception:
         os.unlink(tmp.name)
