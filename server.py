@@ -1,4 +1,5 @@
 import asyncio
+import http.cookiejar
 import io
 import json
 import os
@@ -311,9 +312,22 @@ _COOKIES_BROWSER = os.environ.get("YOUTUBE_COOKIES_BROWSER")  # e.g. "chrome", "
 
 
 def _apply_cookies(ydl_opts: dict) -> None:
-    """Inject cookie configuration into yt-dlp options if available."""
+    """Inject cookie configuration into yt-dlp options if available.
+
+    Instead of passing a file path (which yt-dlp will try to *write back*,
+    causing Permission Denied on Windows), we load the cookies into a
+    MozillaCookieJar with its save method disabled and pass the jar object.
+    This way yt-dlp can read cookies but never attempts a file write.
+    """
     if os.path.isfile(_COOKIES_FILE):
-        ydl_opts["cookiefile"] = _COOKIES_FILE
+        try:
+            jar = http.cookiejar.MozillaCookieJar()
+            jar.load(_COOKIES_FILE, ignore_discard=True, ignore_expires=True)
+            # Disable save so yt-dlp can never trigger a write
+            jar.save = lambda *a, **kw: None
+            ydl_opts["cookiejar"] = jar
+        except OSError:
+            pass  # Skip cookies if we can't read the file
     elif _COOKIES_BROWSER:
         ydl_opts["cookiesfrombrowser"] = (_COOKIES_BROWSER,)
 
@@ -422,17 +436,6 @@ def _parse_vtt(content: str) -> list[dict]:
     return segments
 
 
-def _suppress_cookie_save(ydl: yt_dlp.YoutubeDL) -> None:
-    """Prevent yt-dlp from writing back the cookie file on Windows.
-
-    yt-dlp calls cookiejar.save() inside __exit__, which can raise
-    [Errno 13] Permission denied on Windows (Defender scanning the file).
-    We only need to *read* cookies, never write them back.
-    """
-    if getattr(ydl, 'cookiejar', None) is not None:
-        ydl.cookiejar.save = lambda *a, **kw: None
-
-
 def _extract_captions(
     url: str,
     language_pref: str | None,
@@ -462,7 +465,6 @@ def _extract_captions(
     info_opts: dict = {"quiet": True, "skip_download": True}
     _apply_cookies(info_opts)
     with yt_dlp.YoutubeDL(info_opts) as ydl:
-        _suppress_cookie_save(ydl)
         info = ydl.extract_info(url, download=False)
 
     video_title     = sanitize_filename((info or {}).get("title", "transcript"))
@@ -520,7 +522,6 @@ def _extract_captions(
     }
     _apply_cookies(dl_opts)
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
-        _suppress_cookie_save(ydl)
         ydl.download([url])
 
     vtt_files = _glob.glob(os.path.join(tmp_dir, "*.vtt"))
