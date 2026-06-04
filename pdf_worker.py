@@ -437,39 +437,46 @@ def _download_page_images(page, image_items: list) -> dict:
     return url_to_data
 
 
-def _fetch_images_via_page_eval(page, srcs: list) -> dict:
+def _fetch_images_via_page_eval(page, srcs: list, batch_size: int = 10) -> dict:
     """Fetch images using in-page fetch() with full browser credentials.
 
     Unlike page.request.get(), this runs inside the browser context so it uses
-    Firefox's real cookie jar, HTTP cache, and correct request headers.
+    the browser's real cookie jar, HTTP cache, and correct Referer/Origin headers.
     Works for cached images (no response event fires) and authenticated CDN URLs.
+    Processes in batches to avoid overwhelming the server or hitting evaluate timeouts.
     Returns {url: data_uri} for successfully fetched images.
     """
     if not srcs:
         return {}
-    try:
-        results = page.evaluate("""async (srcs) => {
-            const out = {};
-            await Promise.all(srcs.map(async (src) => {
-                try {
-                    const resp = await fetch(src, {credentials: 'include'});
-                    if (!resp.ok) return;
-                    const blob = await resp.blob();
-                    if (!blob.size) return;
-                    const data = await new Promise((resolve, reject) => {
-                        const reader = new FileReader();
-                        reader.onload = () => resolve(reader.result);
-                        reader.onerror = reject;
-                        reader.readAsDataURL(blob);
-                    });
-                    out[src] = data;
-                } catch (e) {}
-            }));
-            return out;
-        }""", srcs)
-        return results or {}
-    except Exception:
-        return {}
+    all_results = {}
+    # Process in batches to avoid timeout and server rate-limiting
+    for i in range(0, len(srcs), batch_size):
+        batch = srcs[i:i + batch_size]
+        try:
+            results = page.evaluate("""async (srcs) => {
+                const out = {};
+                await Promise.all(srcs.map(async (src) => {
+                    try {
+                        const resp = await fetch(src, {credentials: 'include'});
+                        if (!resp.ok) return;
+                        const blob = await resp.blob();
+                        if (!blob.size) return;
+                        const data = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(blob);
+                        });
+                        out[src] = data;
+                    } catch (e) {}
+                }));
+                return out;
+            }""", batch)
+            if results:
+                all_results.update(results)
+        except Exception:
+            pass
+    return all_results
 
 
 def _reinsert_images(article_html: str, image_items: list, url_to_data: dict) -> tuple[str, int]:
@@ -1098,17 +1105,30 @@ def main():
                         const h = Math.max(document.body.scrollHeight, 3000);
                         for (let y = 0; y < h; y += 300) {
                             window.scrollTo(0, y);
-                            await new Promise(r => setTimeout(r, 80));
+                            await new Promise(r => setTimeout(r, 150));
                         }
                         window.scrollTo(0, 0);
                         await new Promise(r => setTimeout(r, 1000));
                     }""")
                 except Exception:
                     pass
+                # Wait for lazy-loaded images to finish loading after scroll
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8_000)
+                except Exception:
+                    pass
                 status("Collecting image positions...")
                 image_items = _collect_page_images(page)
                 status(f"Downloading {len(image_items)} image(s)...")
-                url_to_data = _download_page_images(page, image_items)
+                # Primary: in-page fetch() — sends proper Referer and credentials,
+                # works with CDNs that have hotlink protection.
+                all_srcs = [item["src"] for item in image_items]
+                url_to_data = _fetch_images_via_page_eval(page, all_srcs)
+                # Fallback: page.request.get() for images that in-page fetch missed
+                still_missing = [item for item in image_items if item["src"] not in url_to_data]
+                if still_missing:
+                    fallback = _download_page_images(page, still_missing)
+                    url_to_data.update(fallback)
                 status(f"Downloaded {len(url_to_data)} of {len(image_items)} image(s).")
                 dom_title = _extract_dom_title(page)
                 raw_html = page.content()

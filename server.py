@@ -454,8 +454,20 @@ def _extract_captions(
       2. extract_info(download=True) — download only the ONE chosen language.
          Using ["all"] is avoided because it fires dozens of HTTP requests
          and triggers YouTube's HTTP 429 rate-limiting.
+
+    Bilibili support:
+      B站 AI-generated subtitles appear in the 'subtitles' dict (not
+      'automatic_captions') under keys such as 'zh-CN' or 'ai-zh'.
+      When no language preference is given, we default to Chinese for
+      Bilibili URLs so the AI captions are selected automatically.
+      Bilibili may require valid login cookies (cookies.txt) to expose
+      subtitle metadata for some videos.
     """
     import glob as _glob
+
+    # For Bilibili URLs, default to Chinese when the caller didn't specify.
+    _is_bilibili = 'bilibili.com' in url or 'b23.tv' in url
+    effective_lang_pref = language_pref or ('zh-CN' if _is_bilibili else None)
 
     # ------------------------------------------------------------------
     # Step 1: metadata only — discover available subtitle languages.
@@ -478,16 +490,19 @@ def _extract_captions(
     auto_langs   = set(auto_captions.keys()) - _NON_SUBTITLE_TRACKS
 
     if not manual_langs and not auto_langs:
-        raise CaptionsNotFoundError("No subtitles or automatic captions found for this video.")
+        hint = " (try adding Bilibili cookies to cookies.txt)" if _is_bilibili else ""
+        raise CaptionsNotFoundError(f"No subtitles or automatic captions found for this video{hint}.")
 
     # Choose the best language (manual preferred over auto).
+    # For Bilibili, 'ai-zh' is the AI-subtitle variant of 'zh'.
     def _pick(pool: set[str]) -> str | None:
-        if language_pref and language_pref in pool:
-            return language_pref
-        if language_pref:
-            base = language_pref.split('-')[0]
-            for k in pool:
-                if k.startswith(base):
+        if effective_lang_pref and effective_lang_pref in pool:
+            return effective_lang_pref
+        if effective_lang_pref:
+            base = effective_lang_pref.split('-')[0]
+            for k in sorted(pool):
+                # Match zh-CN, zh-Hans, ai-zh, ai-zh-CN, etc.
+                if k.startswith(base) or k == f'ai-{base}' or k.startswith(f'ai-{base}'):
                     return k
         if 'en' in pool:
             return 'en'
@@ -505,7 +520,13 @@ def _extract_captions(
         else:
             raise CaptionsNotFoundError("No suitable subtitle language found.")
 
-    source_label = "automatic captions" if is_auto else "manual subtitles"
+    # Bilibili AI subtitle keys look like 'ai-zh' — label them clearly.
+    if chosen_lang.startswith('ai-'):
+        source_label = "AI subtitles"
+    elif is_auto:
+        source_label = "automatic captions"
+    else:
+        source_label = "manual subtitles"
     q.put({"type": "status", "message": f"Found {source_label} in '{chosen_lang}' — downloading..."})
 
     # ------------------------------------------------------------------
