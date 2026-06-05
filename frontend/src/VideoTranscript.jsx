@@ -36,6 +36,7 @@ function VideoTranscript({ token, onAuthError }) {
   const [result, setResult] = useState(null)
   const [history, setHistory] = useState([])
   const [historyLoading, setHistoryLoading] = useState(true)
+  const [historyFilter, setHistoryFilter] = useState('')
   const logContainerRef = useRef(null)
 
   const fetchHistory = useCallback(async () => {
@@ -402,16 +403,28 @@ function VideoTranscript({ token, onAuthError }) {
       {/* History */}
       <div className="history-section">
         <h2>Recent Transcripts</h2>
+        {!historyLoading && history.length > 0 && (
+          <div className="history-filter">
+            <input
+              type="text"
+              placeholder="🔍 Filter by title..."
+              value={historyFilter}
+              onChange={(e) => setHistoryFilter(e.target.value)}
+            />
+          </div>
+        )}
         {historyLoading ? (
           <p className="history-empty">Loading...</p>
         ) : history.length === 0 ? (
           <p className="history-empty">No transcripts yet. Paste a video URL above to get started.</p>
         ) : (
           <ul className="history-list">
-            {history.map((item) => (
+            {history
+              .filter((item) => !historyFilter || item.title?.toLowerCase().includes(historyFilter.toLowerCase()))
+              .map((item) => (
               <li key={item.job_id} className="history-item">
                 <div className="history-info">
-                  <span className="history-title">{item.title}</span>
+                  <span className="history-title" title={item.title}>{item.title}</span>
                   <span className="history-meta">
                     {item.language} · {item.model} · {formatDate(item.created_at)}
                   </span>

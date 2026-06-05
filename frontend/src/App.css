@@ -661,6 +661,24 @@
   padding: 1rem 0;
 }
 
+.history-filter {
+  margin-bottom: 0.75rem;
+}
+
+.history-filter input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.history-filter input:focus {
+  border-color: #6c63ff;
+}
+
 .history-list {
   list-style: none;
   display: flex;
