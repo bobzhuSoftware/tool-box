@@ -36,7 +36,65 @@ function VideoTranscript({ token, onAuthError }) {
   const [history, setHistory] = useState([])
   const [historyLoading, setHistoryLoading] = useState(true)
   const [historyFilter, setHistoryFilter] = useState('')
+  const [whisperModels, setWhisperModels] = useState([])
+  const [showModelManager, setShowModelManager] = useState(false)
+  const [modelDownloadProgress, setModelDownloadProgress] = useState({}) // { modelName: { percent, message } }
   const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch('/api/whisper/models')
+      if (res.ok) {
+        const data = await res.json()
+        setWhisperModels(data)
+      }
+    } catch {}
+  }, [])
+
+  useEffect(() => { fetchModels() }, [fetchModels])
+  // Also refresh models when opening the model manager panel
+  useEffect(() => { if (showModelManager) fetchModels() }, [showModelManager])
+
+  const handleDownloadModel = async (modelName) => {
+    try {
+      setModelDownloadProgress(prev => ({ ...prev, [modelName]: { percent: 0, message: 'Starting...' } }))
+      const res = await fetch(`/api/whisper/models/${modelName}/download`, { method: 'POST' })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Failed' }))
+        setModelDownloadProgress(prev => ({ ...prev, [modelName]: { percent: -1, message: err.detail || 'Error' } }))
+        return
+      }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.type === 'progress') {
+              setModelDownloadProgress(prev => ({ ...prev, [modelName]: { percent: data.percent, message: data.message } }))
+            } else if (data.type === 'status') {
+              setModelDownloadProgress(prev => ({ ...prev, [modelName]: { ...prev[modelName], message: data.message } }))
+            } else if (data.type === 'done') {
+              setModelDownloadProgress(prev => { const n = { ...prev }; delete n[modelName]; return n })
+              fetchModels()
+            } else if (data.type === 'error') {
+              setModelDownloadProgress(prev => ({ ...prev, [modelName]: { percent: -1, message: data.message } }))
+            }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      setModelDownloadProgress(prev => ({ ...prev, [modelName]: { percent: -1, message: 'Network error' } }))
+    }
+  }
 
   const fetchHistory = useCallback(async () => {
     if (!token) { setHistoryLoading(false); return }
@@ -279,13 +337,25 @@ function VideoTranscript({ token, onAuthError }) {
           {transcribeMode !== 'captions' && (
             <label>
               Model
-              <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loading}>
-                <option value="tiny">tiny (fastest)</option>
-                <option value="base">base (default)</option>
-                <option value="small">small</option>
-                <option value="medium">medium</option>
-                <option value="large">large (best)</option>
-              </select>
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <select value={model} onChange={(e) => setModel(e.target.value)} disabled={loading}>
+                  {['tiny', 'base', 'small', 'medium', 'large'].map(m => {
+                    const info = whisperModels.find(x => x.name === m)
+                    const installed = info?.installed
+                    const label = m === 'tiny' ? 'tiny (fastest)' : m === 'base' ? 'base (default)' : m === 'large' ? 'large (best)' : m
+                    return <option key={m} value={m}>{label}{installed ? ' ✓' : ' ⬇'}</option>
+                  })}
+                </select>
+                <button
+                  type="button"
+                  className="btn-sm btn-outline"
+                  onClick={() => setShowModelManager(!showModelManager)}
+                  title="Manage Whisper models"
+                  style={{ whiteSpace: 'nowrap' }}
+                >
+                  ⚙ Models
+                </button>
+              </div>
             </label>
           )}
           <label>
@@ -301,6 +371,91 @@ function VideoTranscript({ token, onAuthError }) {
           </label>
         </div>
       </div>
+
+      {/* Model Manager */}
+      {showModelManager && (
+        <div className="model-manager" style={{
+          background: 'var(--bg-secondary, #f8f9fa)',
+          border: '1px solid var(--border-color, #dee2e6)',
+          borderRadius: '8px',
+          padding: '16px',
+          marginBottom: '16px',
+        }}>
+          <h3 style={{ margin: '0 0 12px', fontSize: '14px' }}>Whisper Model Manager</h3>
+          <p style={{ margin: '0 0 12px', fontSize: '12px', color: '#666' }}>
+            Larger models produce better transcription but take longer to process. Models need to be downloaded before first use.
+          </p>
+          <table style={{ width: '100%', fontSize: '13px', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', borderBottom: '1px solid #ddd' }}>
+                <th style={{ padding: '6px 8px' }}>Model</th>
+                <th style={{ padding: '6px 8px' }}>Size</th>
+                <th style={{ padding: '6px 8px' }}>Quality / Speed</th>
+                <th style={{ padding: '6px 8px' }}>Status</th>
+                <th style={{ padding: '6px 8px' }}>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[
+                { name: 'tiny', quality: '★☆☆☆☆', speed: 'fastest' },
+                { name: 'base', quality: '★★☆☆☆', speed: 'fast' },
+                { name: 'small', quality: '★★★☆☆', speed: 'moderate' },
+                { name: 'medium', quality: '★★★★☆', speed: 'slow' },
+                { name: 'large', quality: '★★★★★', speed: 'slowest' },
+              ].map(({ name, quality, speed }) => {
+                const info = whisperModels.find(x => x.name === name) || {}
+                const dl = modelDownloadProgress[name]
+                const isDownloading = !!dl && dl.percent >= 0
+                return (
+                  <tr key={name} style={{ borderBottom: '1px solid #eee' }}>
+                    <td style={{ padding: '8px' }}><strong>{name}</strong></td>
+                    <td style={{ padding: '8px' }}>{info.expected_mb ? `~${info.expected_mb}MB` : '—'}</td>
+                    <td style={{ padding: '8px' }}>{quality} <span style={{ color: '#888', fontSize: '11px' }}>{speed}</span></td>
+                    <td style={{ padding: '8px', minWidth: '180px' }}>
+                      {info.installed ? (
+                        <span style={{ color: '#28a745' }}>✓ Installed</span>
+                      ) : isDownloading ? (
+                        <div>
+                          <div style={{
+                            background: '#e9ecef', borderRadius: '4px', height: '18px',
+                            overflow: 'hidden', position: 'relative', marginBottom: '4px'
+                          }}>
+                            <div style={{
+                              background: '#007bff', height: '100%', width: `${dl.percent}%`,
+                              transition: 'width 0.3s ease', borderRadius: '4px'
+                            }} />
+                            <span style={{
+                              position: 'absolute', top: '50%', left: '50%',
+                              transform: 'translate(-50%, -50%)',
+                              fontSize: '11px', fontWeight: 'bold', color: dl.percent > 50 ? '#fff' : '#333'
+                            }}>{dl.percent}%</span>
+                          </div>
+                          <span style={{ fontSize: '11px', color: '#666' }}>{dl.message}</span>
+                        </div>
+                      ) : dl && dl.percent === -1 ? (
+                        <span style={{ color: '#dc3545', fontSize: '12px' }}>⚠ {dl.message}</span>
+                      ) : (
+                        <span style={{ color: '#888' }}>Not installed</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '8px' }}>
+                      {info.installed ? (
+                        <button className="btn-sm btn-outline" disabled style={{ opacity: 0.5 }}>Downloaded</button>
+                      ) : isDownloading ? (
+                        <button className="btn-sm btn-outline" disabled>Downloading...</button>
+                      ) : (
+                        <button className="btn-sm btn-primary" onClick={() => handleDownloadModel(name)}>
+                          ⬇ Download
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Progress Log */}
       {progressLog.length > 0 && (
