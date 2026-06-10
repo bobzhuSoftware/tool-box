@@ -1,9 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
+import useSSEStream from './useSSEStream'
 
 function WechatExport({ token, onAuthError }) {
   const [dataDir, setDataDir] = useState('auto')
-  const [loading, setLoading] = useState(false)
-  const [progressLog, setProgressLog] = useState([])
   const [contacts, setContacts] = useState([])
   const [selectedContacts, setSelectedContacts] = useState([])
   const [searchQuery, setSearchQuery] = useState('')
@@ -13,75 +12,38 @@ function WechatExport({ token, onAuthError }) {
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [exportFormat, setExportFormat] = useState('html')
-  const logContainerRef = useRef(null)
+  const { progressLog, logContainerRef, addLog, loading, streamSSE, readSSEStream, setLoading } = useSSEStream()
 
-  useEffect(() => {
-    const el = logContainerRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [progressLog])
-
-  const addLog = (entry) => setProgressLog((prev) => [...prev, entry])
+  const authHeaders = () => token ? { Authorization: `Bearer ${token}` } : {}
 
   const handleConnect = async () => {
-    setLoading(true)
-    setProgressLog([])
     setContacts([])
     setConnected(false)
     setSelectedContacts([])
     setExportResult(null)
 
-    try {
-      const res = await fetch('/api/wechat/contacts/stream', {
+    await streamSSE(
+      () => fetch('/api/wechat/contacts/stream', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ data_dir: dataDir }),
-      })
-
-      if (!res.ok) {
-        if (res.status === 401 && onAuthError) { onAuthError(); return }
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail || `Server error (${res.status})`)
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() ?? ''
-        for (const part of parts) {
-          for (const line of part.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6))
-                if (event.type === 'done') {
-                  const data = event.data || {}
-                  setContacts(data.contacts || [])
-                  setConnected(true)
-                  addLog({ type: 'done', message: `✓ 连接成功！找到 ${(data.contacts || []).length} 个联系人/群聊` })
-                } else if (event.type === 'error') {
-                  addLog({ type: 'error', message: event.message })
-                } else {
-                  addLog({ type: 'status', message: event.message })
-                }
-              } catch { /* ignore */ }
-            }
+      }),
+      {
+        onAuthError,
+        onEvent: (event) => {
+          if (event.type === 'done') {
+            const data = event.data || {}
+            setContacts(data.contacts || [])
+            setConnected(true)
+            addLog({ type: 'done', message: `✓ 连接成功！找到 ${(data.contacts || []).length} 个联系人/群聊` })
+          } else if (event.type === 'error') {
+            addLog({ type: 'error', message: event.message })
+          } else {
+            addLog({ type: 'status', message: event.message })
           }
-        }
+        },
       }
-    } catch (err) {
-      addLog({ type: 'error', message: err.message || '连接失败' })
-    } finally {
-      setLoading(false)
-    }
+    )
   }
 
   const handleExport = async () => {
@@ -95,10 +57,7 @@ function WechatExport({ token, onAuthError }) {
       try {
         const res = await fetch('/api/wechat/export/stream', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
             data_dir: dataDir,
             contact_id: contact.id,
@@ -115,37 +74,19 @@ function WechatExport({ token, onAuthError }) {
           throw new Error(data.detail || `Server error (${res.status})`)
         }
 
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split('\n\n')
-          buffer = parts.pop() ?? ''
-          for (const part of parts) {
-            for (const line of part.split('\n')) {
-              if (line.startsWith('data: ')) {
-                try {
-                  const event = JSON.parse(line.slice(6))
-                  if (event.type === 'done') {
-                    setExportResult(event)
-                    addLog({ type: 'done', message: `✓ ${contact.name}: 导出完成 (${event.count} 条消息)` })
-                    // Auto-download
-                    const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
-                    window.open(`/api/wechat/download/${event.job_id}${authParam}`, '_blank')
-                  } else if (event.type === 'error') {
-                    addLog({ type: 'error', message: `${contact.name}: ${event.message}` })
-                  } else {
-                    addLog({ type: 'status', message: event.message })
-                  }
-                } catch { /* ignore */ }
-              }
-            }
+        await readSSEStream(res, (event) => {
+          if (event.type === 'done') {
+            setExportResult(event)
+            addLog({ type: 'done', message: `✓ ${contact.name}: 导出完成 (${event.count} 条消息)` })
+            // Auto-download
+            const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
+            window.open(`/api/wechat/download/${event.job_id}${authParam}`, '_blank')
+          } else if (event.type === 'error') {
+            addLog({ type: 'error', message: `${contact.name}: ${event.message}` })
+          } else {
+            addLog({ type: 'status', message: event.message })
           }
-        }
+        })
       } catch (err) {
         addLog({ type: 'error', message: `${contact.name}: ${err.message}` })
       }

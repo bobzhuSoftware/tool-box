@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import useSSEStream from './useSSEStream'
 
 function DiscordExport({ token, onAuthError }) {
   const [discordToken, setDiscordToken] = useState('')
@@ -6,12 +7,10 @@ function DiscordExport({ token, onAuthError }) {
   const [limit, setLimit] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [progressLog, setProgressLog] = useState([])
   const [result, setResult] = useState(null)
   const [showHelp, setShowHelp] = useState(false)
   const [tokenSaved, setTokenSaved] = useState(false)
-  const logContainerRef = useRef(null)
+  const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
 
   // Load saved token from DB on mount
   useEffect(() => {
@@ -29,18 +28,8 @@ function DiscordExport({ token, onAuthError }) {
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const el = logContainerRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [progressLog])
-
-  const addLog = (entry) => setProgressLog((prev) => [...prev, entry])
-
   const handleExport = async () => {
     if (!discordToken.trim() || !channelUrl.trim()) return
-    setLoading(true)
-    setProgressLog([])
     setResult(null)
     // Persist token to DB
     fetch('/api/discord/token', {
@@ -49,8 +38,8 @@ function DiscordExport({ token, onAuthError }) {
       body: JSON.stringify({ token: discordToken.trim() }),
     }).then(() => setTokenSaved(true)).catch(() => {})
 
-    try {
-      const res = await fetch('/api/discord/stream', {
+    await streamSSE(
+      () => fetch('/api/discord/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -63,47 +52,21 @@ function DiscordExport({ token, onAuthError }) {
           start_date: startDate || null,
           end_date: endDate || null,
         }),
-      })
-
-      if (!res.ok) {
-        if (res.status === 401 && onAuthError) { onAuthError(); return }
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail || `Server error (${res.status})`)
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() ?? ''
-        for (const part of parts) {
-          for (const line of part.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6))
-                if (event.type === 'done') {
-                  setResult(event)
-                  addLog({ type: 'done', message: `✓ 导出完成！共 ${event.message_count} 条消息` })
-                } else if (event.type === 'error') {
-                  addLog({ type: 'error', message: event.message })
-                } else {
-                  addLog({ type: 'status', message: event.message })
-                }
-              } catch { /* ignore */ }
-            }
+      }),
+      {
+        onAuthError,
+        onEvent: (event) => {
+          if (event.type === 'done') {
+            setResult(event)
+            addLog({ type: 'done', message: `✓ 导出完成！共 ${event.message_count} 条消息` })
+          } else if (event.type === 'error') {
+            addLog({ type: 'error', message: event.message })
+          } else {
+            addLog({ type: 'status', message: event.message })
           }
-        }
+        },
       }
-    } catch (err) {
-      addLog({ type: 'error', message: err.message || '导出失败' })
-    } finally {
-      setLoading(false)
-    }
+    )
   }
 
   const handleSaveToken = () => {

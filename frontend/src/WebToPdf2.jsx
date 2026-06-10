@@ -1,75 +1,37 @@
 import { useState, useRef, useEffect } from 'react'
+import useSSEStream from './useSSEStream'
 
 function WebToPdf2({ token, onAuthError }) {
   const [url, setUrl] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [progressLog, setProgressLog] = useState([])
   const [result, setResult] = useState(null)
-  const logContainerRef = useRef(null)
+  const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
 
-  useEffect(() => {
-    const el = logContainerRef.current
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [progressLog])
-
-  const addLog = (entry) => setProgressLog(prev => [...prev, entry])
+  const authHeaders = () => token ? { Authorization: `Bearer ${token}` } : {}
 
   const handleGenerate = async () => {
     if (!url.trim()) return
-    setLoading(true)
-    setProgressLog([])
     setResult(null)
 
-    try {
-      const res = await fetch('/api/pdf2/stream', {
+    await streamSSE(
+      () => fetch('/api/pdf2/stream', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ url: url.trim() }),
-      })
-
-      if (!res.ok) {
-        if (res.status === 401 && onAuthError) { onAuthError(); return }
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail || `Server error (${res.status})`)
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() ?? ''
-        for (const part of parts) {
-          for (const line of part.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6))
-                if (event.type === 'done') {
-                  setResult({ job_id: event.job_id })
-                  addLog({ type: 'done', message: 'PDF generated! Click below to download.' })
-                } else if (event.type === 'error') {
-                  addLog({ type: 'error', message: event.message })
-                } else {
-                  addLog({ type: 'status', message: event.message })
-                }
-              } catch { /* ignore malformed lines */ }
-            }
+      }),
+      {
+        onAuthError,
+        onEvent: (event) => {
+          if (event.type === 'done') {
+            setResult({ job_id: event.job_id })
+            addLog({ type: 'done', message: 'PDF generated! Click below to download.' })
+          } else if (event.type === 'error') {
+            addLog({ type: 'error', message: event.message })
+          } else {
+            addLog({ type: 'status', message: event.message })
           }
-        }
+        },
       }
-    } catch (err) {
-      addLog({ type: 'error', message: err.message || 'Something went wrong' })
-    } finally {
-      setLoading(false)
-    }
+    )
   }
 
   const handleDownload = () => {

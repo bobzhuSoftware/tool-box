@@ -34,6 +34,21 @@ try:
 except ImportError:
     _has_zhconv = False
 
+# ---------------------------------------------------------------------------
+# Whisper model cache — avoids reloading the same model on every request
+# ---------------------------------------------------------------------------
+_whisper_models: dict[str, whisper.Whisper] = {}
+_whisper_lock = threading.Lock()
+
+
+def _get_whisper_model(model_name: str) -> whisper.Whisper:
+    """Return a cached Whisper model, loading it on first use."""
+    if model_name not in _whisper_models:
+        with _whisper_lock:
+            if model_name not in _whisper_models:  # double-check after acquiring lock
+                _whisper_models[model_name] = whisper.load_model(model_name)
+    return _whisper_models[model_name]
+
 
 def to_simplified(text: str, language: str) -> str:
     """Convert Traditional Chinese to Simplified if language is Chinese."""
@@ -297,6 +312,11 @@ def login(req: RegisterRequest):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     token = _create_access_token({"sub": user.id})
     return {"access_token": token, "token_type": "bearer", "username": user.username}
+
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
 
 
 @app.get("/api/me")
@@ -605,7 +625,7 @@ def transcribe(req: TranscribeRequest, user: User = Depends(require_user)):
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             audio_path = download_audio(req.url, tmp_dir)
-            model = whisper.load_model(req.model)
+            model = _get_whisper_model(req.model)
             options = {}
             if req.language:
                 options["language"] = req.language
@@ -834,7 +854,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                         raise FileNotFoundError("Audio file not found after download. Is FFmpeg installed?")
 
                     q.put({"type": "status", "message": f"Loading Whisper model '{req.model}'..."})
-                    whisper_model = whisper.load_model(req.model)
+                    whisper_model = _get_whisper_model(req.model)
 
                     q.put({"type": "status", "message": "Transcribing audio... (this may take several minutes)"})
                     options: dict = {}
@@ -991,7 +1011,7 @@ async def transcribe_upload(
                     raise RuntimeError(f"FFmpeg conversion failed: {proc.stderr[-500:] if proc.stderr else 'unknown error'}")
 
                 q.put({"type": "status", "message": f"Loading Whisper model '{model}'..."})
-                whisper_model = whisper.load_model(model)
+                whisper_model = _get_whisper_model(model)
 
                 q.put({"type": "status", "message": "Transcribing audio... (this may take several minutes)"})
                 options = {}
@@ -1341,6 +1361,18 @@ def _save_book_job(job_id: str, src_path: str, user_id: str, filename: str) -> N
         json.dump({"user_id": user_id, "filename": filename, "ext": ext}, f)
 
 
+def _cleanup_old_books(max_age_seconds: int = 3600) -> None:
+    """Delete Book cache files older than max_age_seconds."""
+    now = datetime.now().timestamp()
+    for fname in os.listdir(_BOOK_CACHE_DIR):
+        fpath = os.path.join(_BOOK_CACHE_DIR, fname)
+        try:
+            if now - os.path.getmtime(fpath) > max_age_seconds:
+                os.unlink(fpath)
+        except OSError:
+            pass
+
+
 def _get_book_job(job_id: str, user_id: str) -> tuple[str, str] | None:
     """Return (file_path, download_filename) if job belongs to user, else None."""
     meta_path = _book_meta_path(job_id)
@@ -1501,6 +1533,7 @@ def book_download(
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    _cleanup_old_books()
     result = _get_book_job(job_id, user.id)
     if result is None:
         raise HTTPException(status_code=404, detail="Conversion job not found or expired")
@@ -1524,6 +1557,18 @@ def _vtt_file_path(job_id: str) -> str:
 
 def _vtt_meta_path(job_id: str) -> str:
     return os.path.join(_VTT_CACHE_DIR, f"{job_id}.json")
+
+
+def _cleanup_old_vtt(max_age_seconds: int = 3600) -> None:
+    """Delete VTT cache files older than max_age_seconds."""
+    now = datetime.now().timestamp()
+    for fname in os.listdir(_VTT_CACHE_DIR):
+        fpath = os.path.join(_VTT_CACHE_DIR, fname)
+        try:
+            if now - os.path.getmtime(fpath) > max_age_seconds:
+                os.unlink(fpath)
+        except OSError:
+            pass
 
 
 class TeamsTranscriptRequest(BaseModel):
@@ -1641,6 +1686,7 @@ def download_vtt(
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    _cleanup_old_vtt()
     vtt_file = _vtt_file_path(job_id)
     meta_file = _vtt_meta_path(job_id)
     if not os.path.isfile(vtt_file) or not os.path.isfile(meta_file):
@@ -1671,6 +1717,18 @@ def _wechat_file_path(job_id: str, fmt: str = "txt") -> str:
 
 def _wechat_meta_path(job_id: str) -> str:
     return os.path.join(_WECHAT_CACHE_DIR, f"{job_id}.json")
+
+
+def _cleanup_old_wechat(max_age_seconds: int = 3600) -> None:
+    """Delete WeChat cache files older than max_age_seconds."""
+    now = datetime.now().timestamp()
+    for fname in os.listdir(_WECHAT_CACHE_DIR):
+        fpath = os.path.join(_WECHAT_CACHE_DIR, fname)
+        try:
+            if now - os.path.getmtime(fpath) > max_age_seconds:
+                os.unlink(fpath)
+        except OSError:
+            pass
 
 
 class WechatContactsRequest(BaseModel):
@@ -1861,6 +1919,7 @@ def download_wechat(
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    _cleanup_old_wechat()
     txt_file = _wechat_file_path(job_id)
     meta_file = _wechat_meta_path(job_id)
     if not os.path.isfile(meta_file):

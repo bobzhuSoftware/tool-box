@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import useSSEStream from './useSSEStream'
 
 const DIRECTIONS = [
   { value: 'epub2pdf', label: 'EPUB → PDF', accept: '.epub', srcLabel: 'EPUB', dstLabel: 'PDF', icon: '📚' },
@@ -9,19 +10,10 @@ function BookConverter({ token, onAuthError }) {
   const [direction, setDirection] = useState('epub2pdf')
   const [file, setFile] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [progressLog, setProgressLog] = useState([])
   const [result, setResult] = useState(null) // { job_id, filename }
   const fileInputRef = useRef(null)
-  const logContainerRef = useRef(null)
   const dragCounter = useRef(0) // track nested drag enter/leave
-
-  useEffect(() => {
-    const el = logContainerRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [progressLog])
-
-  const addLog = (entry) => setProgressLog((prev) => [...prev, entry])
+  const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
 
   const currentDir = DIRECTIONS.find((d) => d.value === direction)
 
@@ -82,60 +74,32 @@ function BookConverter({ token, onAuthError }) {
 
   const handleConvert = async () => {
     if (!file) return
-    setLoading(true)
-    setProgressLog([])
     setResult(null)
 
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('direction', direction)
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('direction', direction)
 
-      const res = await fetch('/api/book/convert', {
+    await streamSSE(
+      () => fetch('/api/book/convert', {
         method: 'POST',
         headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: formData,
-      })
-
-      if (!res.ok) {
-        if (res.status === 401 && onAuthError) { onAuthError(); return }
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.detail || `Server error (${res.status})`)
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() ?? ''
-        for (const part of parts) {
-          for (const line of part.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6))
-                if (event.type === 'done') {
-                  setResult({ job_id: event.job_id, filename: event.filename })
-                  addLog({ type: 'done', message: `Conversion complete — ${event.filename}` })
-                } else if (event.type === 'error') {
-                  addLog({ type: 'error', message: event.message })
-                } else if (event.type === 'status') {
-                  addLog({ type: 'status', message: event.message })
-                }
-              } catch { /* ignore malformed lines */ }
-            }
+      }),
+      {
+        onAuthError,
+        onEvent: (event) => {
+          if (event.type === 'done') {
+            setResult({ job_id: event.job_id, filename: event.filename })
+            addLog({ type: 'done', message: `Conversion complete — ${event.filename}` })
+          } else if (event.type === 'error') {
+            addLog({ type: 'error', message: event.message })
+          } else if (event.type === 'status') {
+            addLog({ type: 'status', message: event.message })
           }
-        }
+        },
       }
-    } catch (err) {
-      addLog({ type: 'error', message: err.message || 'Something went wrong' })
-    } finally {
-      setLoading(false)
-    }
+    )
   }
 
   const handleDownload = () => {

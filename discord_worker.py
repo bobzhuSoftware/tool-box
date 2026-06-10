@@ -26,6 +26,22 @@ sys.stdout = io.TextIOWrapper(
 DISCORD_API = "https://discord.com/api/v10"
 MESSAGES_PER_REQUEST = 100
 
+# Pre-compiled regex patterns for Discord markdown → HTML conversion
+_RE_CODE_BLOCK = re.compile(r"```(\w*)\n?(.*?)```", flags=re.DOTALL)
+_RE_INLINE_CODE = re.compile(r"`([^`]+)`")
+_RE_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_RE_ITALIC_STAR = re.compile(r"\*(.+?)\*")
+_RE_ITALIC_UNDER = re.compile(r"_(.+?)_")
+_RE_UNDERLINE = re.compile(r"__(.+?)__")
+_RE_STRIKETHROUGH = re.compile(r"~~(.+?)~~")
+_RE_SPOILER = re.compile(r"\|\|(.+?)\|\|")
+_RE_URL = re.compile(r"(https?://[^\s<]+)")
+_RE_USER_MENTION = re.compile(r"&lt;@!?(\d+)&gt;")
+_RE_CHANNEL_MENTION = re.compile(r"&lt;#(\d+)&gt;")
+_RE_ROLE_MENTION = re.compile(r"&lt;@&amp;(\d+)&gt;")
+_RE_CUSTOM_EMOJI = re.compile(r"&lt;:(\w+):(\d+)&gt;")
+_RE_ANIMATED_EMOJI = re.compile(r"&lt;a:(\w+):(\d+)&gt;")
+
 
 def status(msg: str):
     print(f"STATUS:{msg}", flush=True)
@@ -352,33 +368,33 @@ def _format_discord_markdown(text: str, user_map: dict = None) -> str:
         user_map = {}
     text = _escape_html(text)
     # Code blocks
-    text = re.sub(r"```(\w*)\n?(.*?)```", r'<pre><code>\2</code></pre>', text, flags=re.DOTALL)
+    text = _RE_CODE_BLOCK.sub(r'<pre><code>\2</code></pre>', text)
     # Inline code
-    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = _RE_INLINE_CODE.sub(r"<code>\1</code>", text)
     # Bold
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = _RE_BOLD.sub(r"<strong>\1</strong>", text)
     # Italic
-    text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
-    text = re.sub(r"_(.+?)_", r"<em>\1</em>", text)
+    text = _RE_ITALIC_STAR.sub(r"<em>\1</em>", text)
+    text = _RE_ITALIC_UNDER.sub(r"<em>\1</em>", text)
     # Underline
-    text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
+    text = _RE_UNDERLINE.sub(r"<u>\1</u>", text)
     # Strikethrough
-    text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", text)
+    text = _RE_STRIKETHROUGH.sub(r"<del>\1</del>", text)
     # Spoiler
-    text = re.sub(r"\|\|(.+?)\|\|", r'<span class="spoiler">\1</span>', text)
+    text = _RE_SPOILER.sub(r'<span class="spoiler">\1</span>', text)
     # URLs
-    text = re.sub(r"(https?://[^\s<]+)", r'<a href="\1" target="_blank">\1</a>', text)
+    text = _RE_URL.sub(r'<a href="\1" target="_blank">\1</a>', text)
     # Mentions — resolve user IDs to display names
     def _replace_user_mention(m):
         uid = m.group(1)
         name = user_map.get(uid, f"user_{uid[-4:]}")
         return f'<span class="mention">@{_escape_html(name)}</span>'
-    text = re.sub(r"&lt;@!?(\d+)&gt;", _replace_user_mention, text)
-    text = re.sub(r"&lt;#(\d+)&gt;", r'<span class="mention">#channel</span>', text)
-    text = re.sub(r"&lt;@&amp;(\d+)&gt;", r'<span class="mention">@role</span>', text)
+    text = _RE_USER_MENTION.sub(_replace_user_mention, text)
+    text = _RE_CHANNEL_MENTION.sub(r'<span class="mention">#channel</span>', text)
+    text = _RE_ROLE_MENTION.sub(r'<span class="mention">@role</span>', text)
     # Emoji (custom)
-    text = re.sub(r"&lt;:(\w+):(\d+)&gt;", r'<img class="emoji" src="https://cdn.discordapp.com/emojis/\2.png?size=20" alt=":\1:">', text)
-    text = re.sub(r"&lt;a:(\w+):(\d+)&gt;", r'<img class="emoji" src="https://cdn.discordapp.com/emojis/\2.gif?size=20" alt=":\1:">', text)
+    text = _RE_CUSTOM_EMOJI.sub(r'<img class="emoji" src="https://cdn.discordapp.com/emojis/\2.png?size=20" alt=":\1:">', text)
+    text = _RE_ANIMATED_EMOJI.sub(r'<img class="emoji" src="https://cdn.discordapp.com/emojis/\2.gif?size=20" alt=":\1:">', text)
     # Newlines
     text = text.replace("\n", "<br>")
     return text

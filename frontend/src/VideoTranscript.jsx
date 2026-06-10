@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import useSSEStream from './useSSEStream'
 
 function formatDate(iso) {
   const d = new Date(iso)
@@ -31,13 +32,11 @@ function VideoTranscript({ token, onAuthError }) {
     },
   }
 
-  const [loading, setLoading] = useState(false)
-  const [progressLog, setProgressLog] = useState([])
   const [result, setResult] = useState(null)
   const [history, setHistory] = useState([])
   const [historyLoading, setHistoryLoading] = useState(true)
   const [historyFilter, setHistoryFilter] = useState('')
-  const logContainerRef = useRef(null)
+  const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
 
   const fetchHistory = useCallback(async () => {
     if (!token) { setHistoryLoading(false); return }
@@ -51,41 +50,18 @@ function VideoTranscript({ token, onAuthError }) {
 
   useEffect(() => { fetchHistory() }, [fetchHistory])
 
-  useEffect(() => {
-    const el = logContainerRef.current
-    if (!el) return
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
-    if (isNearBottom) el.scrollTop = el.scrollHeight
-  }, [progressLog])
-
-  const addLog = (entry) => {
-    if (entry.type === 'progress') {
-      setProgressLog(prev => {
-        const last = prev[prev.length - 1]
-        if (last?.type === 'progress') return [...prev.slice(0, -1), entry]
-        return [...prev, entry]
-      })
-    } else {
-      setProgressLog(prev => [...prev, entry])
-    }
-  }
-
   const handleTranscribe = async () => {
     if (inputMode === 'url' && !url.trim()) return
     if (inputMode === 'upload' && !uploadFile) return
-    setLoading(true)
-    setProgressLog([])
     setResult(null)
 
-    try {
-      let response
-
+    const fetchFn = () => {
       if (inputMode === 'upload') {
         const formData = new FormData()
         formData.append('file', uploadFile)
         formData.append('model', model)
         formData.append('language', language.trim())
-        response = await fetch('/api/transcribe/upload', {
+        return fetch('/api/transcribe/upload', {
           method: 'POST',
           headers: { ...authHeaders() },
           body: formData,
@@ -93,54 +69,29 @@ function VideoTranscript({ token, onAuthError }) {
       } else {
         const body = { url: url.trim(), model, mode: transcribeMode }
         if (language.trim()) body.language = language.trim()
-        response = await fetch('/api/transcribe/stream', {
+        return fetch('/api/transcribe/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify(body),
         })
       }
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}))
-        throw new Error(data.detail || `Server error (${response.status})`)
-      }
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const parts = buffer.split('\n\n')
-        buffer = parts.pop() ?? ''
-
-        for (const part of parts) {
-          for (const line of part.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const event = JSON.parse(line.slice(6))
-                if (event.type === 'done') {
-                  setResult(event)
-                  const doneMsg = event.source === 'captions'
-                    ? `Extracted from existing captions! Detected language: ${event.language}`
-                    : `Transcription complete! Detected language: ${event.language}`
-                  addLog({ type: 'done', message: doneMsg })
-                  fetchHistory()
-                } else {
-                  addLog(event)
-                }
-              } catch { /* ignore malformed SSE lines */ }
-            }
-          }
-        }
-      }
-    } catch (err) {
-      addLog({ type: 'error', message: err.message || 'Something went wrong' })
-    } finally {
-      setLoading(false)
     }
+
+    await streamSSE(fetchFn, {
+      onAuthError,
+      onEvent: (event) => {
+        if (event.type === 'done') {
+          setResult(event)
+          const doneMsg = event.source === 'captions'
+            ? `Extracted from existing captions! Detected language: ${event.language}`
+            : `Transcription complete! Detected language: ${event.language}`
+          addLog({ type: 'done', message: doneMsg })
+          fetchHistory()
+        } else {
+          addLog(event)
+        }
+      },
+    })
   }
 
   const handleDownload = async (jobId, withTimestamps, chunkMinutes = 0) => {
