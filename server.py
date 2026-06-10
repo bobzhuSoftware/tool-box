@@ -325,6 +325,155 @@ def get_me(user: User = Depends(require_user)):
 
 
 # ---------------------------------------------------------------------------
+# Whisper model management
+# ---------------------------------------------------------------------------
+_WHISPER_MODEL_SIZES = {
+    "tiny": 72, "base": 139, "small": 461,
+    "medium": 1457, "large": 2944,
+}  # accurate download sizes in MB (from Content-Length headers)
+
+_model_download_status: dict[str, str] = {}  # model_name -> "downloading" | "done" | "error:..."
+
+
+def _whisper_cache_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+
+
+def _get_installed_models() -> list[dict]:
+    """Return list of models with their install status."""
+    cache_dir = _whisper_cache_dir()
+    results = []
+    for name in ["tiny", "base", "small", "medium", "large"]:
+        # Use actual filename from whisper's URL (e.g. large -> large-v3.pt)
+        url = whisper._MODELS.get(name, "")
+        expected_file = os.path.basename(url) if url else f"{name}.pt"
+        file_path = os.path.join(cache_dir, expected_file)
+        installed = False
+        file_size_mb = 0
+        if os.path.isfile(file_path):
+            file_size_mb = os.path.getsize(file_path) / 1024 / 1024
+            expected_mb = _WHISPER_MODEL_SIZES.get(name, 0)
+            # Consider installed if file is at least 85% of expected size
+            installed = file_size_mb >= expected_mb * 0.85
+        status = _model_download_status.get(name, "")
+        results.append({
+            "name": name,
+            "installed": installed,
+            "size_mb": round(file_size_mb),
+            "expected_mb": _WHISPER_MODEL_SIZES.get(name, 0),
+            "downloading": status == "downloading",
+        })
+    return results
+
+
+@app.get("/api/whisper/models")
+def list_whisper_models():
+    """Return available Whisper models and their install status."""
+    return _get_installed_models()
+
+
+def _download_model_with_progress(model_name: str, progress_queue: stdlib_queue.Queue):
+    """Download a whisper model file with progress reporting via queue."""
+    import urllib.request
+    import hashlib
+
+    url = whisper._MODELS[model_name]
+    root = _whisper_cache_dir()
+    os.makedirs(root, exist_ok=True)
+
+    expected_sha256 = url.split("/")[-2]
+    download_target = os.path.join(root, os.path.basename(url))
+
+    # Check if already valid
+    if os.path.isfile(download_target):
+        with open(download_target, "rb") as f:
+            model_bytes = f.read()
+        if hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
+            progress_queue.put({"type": "done", "message": "Model already installed"})
+            return
+
+    progress_queue.put({"type": "status", "message": f"Connecting to download server..."})
+
+    with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
+        total = int(source.info().get("Content-Length", 0))
+        downloaded = 0
+        last_report = 0
+
+        while True:
+            buffer = source.read(65536)  # 64KB chunks for better progress
+            if not buffer:
+                break
+            output.write(buffer)
+            downloaded += len(buffer)
+
+            # Report progress every 1%
+            if total > 0:
+                pct = int(downloaded * 100 / total)
+                if pct > last_report:
+                    last_report = pct
+                    speed_mb = downloaded / 1024 / 1024
+                    total_mb = total / 1024 / 1024
+                    progress_queue.put({
+                        "type": "progress",
+                        "message": f"Downloading: {pct}% ({speed_mb:.0f}MB / {total_mb:.0f}MB)",
+                        "percent": pct,
+                        "downloaded_mb": round(speed_mb),
+                        "total_mb": round(total_mb),
+                    })
+
+    # Verify checksum
+    progress_queue.put({"type": "status", "message": "Verifying file integrity..."})
+    with open(download_target, "rb") as f:
+        model_bytes = f.read()
+    if hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
+        os.remove(download_target)
+        progress_queue.put({"type": "error", "message": "Download corrupted, please retry"})
+        return
+
+    progress_queue.put({"type": "status", "message": "Loading model into memory..."})
+    # Load model to verify it works
+    whisper.load_model(model_name)
+    progress_queue.put({"type": "done", "message": f"Model '{model_name}' installed successfully!"})
+
+
+@app.post("/api/whisper/models/{model_name}/download")
+def download_whisper_model_stream(model_name: str):
+    """Stream model download progress via SSE."""
+    valid = ["tiny", "base", "small", "medium", "large"]
+    if model_name not in valid:
+        raise HTTPException(status_code=400, detail=f"Invalid model. Choose from: {valid}")
+    if _model_download_status.get(model_name) == "downloading":
+        raise HTTPException(status_code=409, detail="Already downloading this model")
+
+    progress_queue: stdlib_queue.Queue = stdlib_queue.Queue()
+
+    def _worker():
+        try:
+            _model_download_status[model_name] = "downloading"
+            _download_model_with_progress(model_name, progress_queue)
+            _model_download_status[model_name] = "done"
+        except Exception as e:
+            _model_download_status[model_name] = f"error:{e}"
+            progress_queue.put({"type": "error", "message": str(e)})
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    def _event_stream():
+        while True:
+            try:
+                msg = progress_queue.get(timeout=60)
+            except stdlib_queue.Empty:
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Still downloading...'})}\n\n"
+                continue
+            yield f"data: {json.dumps(msg)}\n\n"
+            if msg.get("type") in ("done", "error"):
+                break
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+
+
+
+# ---------------------------------------------------------------------------
 # Cookie resolution (YouTube bot-detection bypass)
 # ---------------------------------------------------------------------------
 _COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
