@@ -12,7 +12,7 @@ import unicodedata
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode, urlunparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -1486,6 +1486,49 @@ async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# DSV ServiceNow URL normalizer
+# ---------------------------------------------------------------------------
+# DSV ServiceNow wraps every page inside a frameset URL like
+#   https://dsv.service-now.com/now/nav/ui/classic/params/target/<encoded-target>
+# The bare page (kb_view.do?sys_kb_id=...) renders much cleaner. Strip the
+# wrapper and keep only sys_kb_id; the user opens the result in their own
+# signed-in Edge and prints to PDF from there.
+_DSV_FRAME_WRAPPER_RE = re.compile(
+    r"^https?://dsv\.service-now\.com/now/nav/ui/classic/params/target/(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_dsv_url(url: str) -> str:
+    m = _DSV_FRAME_WRAPPER_RE.match(url.strip())
+    if not m:
+        return url.strip()
+    inner = unquote(m.group(1))
+    if "?" in inner:
+        path, query = inner.split("?", 1)
+    else:
+        path, query = inner, ""
+    params = parse_qs(query, keep_blank_values=False)
+    kb_id = params.get("sys_kb_id", [None])[0]
+    new_query = urlencode({"sys_kb_id": kb_id}) if kb_id else ""
+    return urlunparse(("https", "dsv.service-now.com",
+                       "/" + path.lstrip("/"), "", new_query, ""))
+
+
+class DsvNormalizeRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/dsv-pdf/normalize")
+def dsv_pdf_normalize(req: DsvNormalizeRequest, user: User = Depends(require_user)):
+    url = req.url.strip()
+    if not _URL_PATTERN.match(url):
+        raise HTTPException(status_code=400, detail="Only http:// and https:// URLs are supported")
+    normalized = _normalize_dsv_url(url)
+    return {"normalized_url": normalized, "changed": normalized != url}
 
 
 # ---------------------------------------------------------------------------

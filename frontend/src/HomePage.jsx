@@ -28,6 +28,14 @@ function HomePage({ onSelectTool }) {
       tags: ['PDF', 'Article', 'Readability'],
     },
     {
+      id: 'dsvpdf',
+      icon: '🏢',
+      title: 'DSV Page to PDF',
+      description:
+        'Unwraps a DSV ServiceNow frame URL to the bare page so you can open it in your signed-in Edge and print to PDF (Ctrl+P).',
+      tags: ['PDF', 'DSV', 'Internal'],
+    },
+    {
       id: 'teams',
       icon: '📋',
       title: 'Teams Transcript',
