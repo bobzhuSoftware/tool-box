@@ -13,6 +13,11 @@ frontend/dist/
 
 # Database
 *.db
+*.db-shm
+*.db-wal
+
+# Local data junction — real folder lives in OneDrive ProjectData
+data/
 
 # Whisper model cache (downloaded automatically, too large for git)
 .cache/

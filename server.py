@@ -76,11 +76,14 @@ if FFMPEG_LOCATION and FFMPEG_LOCATION not in os.environ.get("PATH", ""):
 # Database
 # ---------------------------------------------------------------------------
 # On Fly.io set env var DB_PATH=/data/transcripts.db (persisted Volume).
-# Locally falls back to the project directory.
+# Locally falls back to <repo>/data/transcripts.db. The `data/` folder at the
+# repo root is a junction pointing at OneDrive ProjectData (so the DB is
+# backed up via OneDrive and never tracked in git).
 DB_PATH = os.environ.get(
     "DB_PATH",
-    os.path.join(os.path.dirname(__file__), "transcripts.db"),
+    os.path.join(os.path.dirname(__file__), "data", "transcripts.db"),
 )
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
 
