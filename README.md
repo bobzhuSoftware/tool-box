@@ -75,6 +75,73 @@ Then open **http://localhost:5173** in your browser.
 3. Click **Transcribe** and wait for processing
 4. View the transcript and download as a `.txt` file
 
+## Extracting Audio from Local Videos (recommended for large files)
+
+For large local videos (e.g. a 2 GB Teams recording), extracting audio first dramatically speeds up upload — the audio is usually 20-50× smaller than the video, and Whisper only needs the audio anyway.
+
+Replace `INPUT.mp4` with your filename. All commands assume FFmpeg is on your PATH.
+
+> Whisper resamples to 16 kHz mono internally, so going beyond preset C gains nothing for transcription quality.
+
+### Preset A — minimum size (clean single-speaker audio only)
+
+~10 MB per hour. Use for podcasts, single-person recordings.
+
+```powershell
+ffmpeg -i "INPUT.mp4" -vn -ac 1 -ar 16000 -c:a libopus -b:a 24k "output.ogg"
+```
+
+### Preset B — balanced (recommended default)
+
+~20 MB per hour. Best price/quality for transcription.
+
+```powershell
+ffmpeg -i "INPUT.mp4" -vn -ac 1 -ar 16000 -c:a libopus -b:a 48k "output.ogg"
+```
+
+### Preset C — Teams / Zoom multi-speaker meetings
+
+~30 MB per hour. Keeps stereo so quiet remote speakers aren't lost in mono downmix.
+
+```powershell
+ffmpeg -i "INPUT.mp4" -vn -ac 2 -ar 16000 -c:a libopus -b:a 64k "output.ogg"
+```
+
+### Preset D — meetings with uneven volume / background noise
+
+Same size as preset B, but applies a high-pass filter (cuts low-frequency hum), low-pass filter (cuts non-speech highs), and EBU R128 loudness normalization (evens out quiet/loud speakers).
+
+```powershell
+ffmpeg -i "INPUT.mp4" -vn -ac 1 -ar 16000 -af "highpass=f=80,lowpass=f=8000,loudnorm=I=-16:TP=-1.5:LRA=11" -c:a libopus -b:a 48k "output.ogg"
+```
+
+### Preset E — maximum compatibility (mp3)
+
+~30 MB per hour. Use if the upload target rejects `.ogg` / Opus.
+
+```powershell
+ffmpeg -i "INPUT.mp4" -vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 64k "output.mp3"
+```
+
+### Preset F — high fidelity (archival / playback)
+
+~60-80 MB per hour. Stereo, 44.1 kHz, VBR ~128 kbps. Use only when you also want to listen back later.
+
+```powershell
+ffmpeg -i "INPUT.mp4" -vn -ac 2 -ar 44100 -c:a libmp3lame -q:a 4 "output.mp3"
+```
+
+### Which one to pick
+
+| Scenario | Preset |
+| --- | --- |
+| Single speaker, clean recording | A or B |
+| General default | **B** |
+| Teams / Zoom meeting (multiple speakers) | **C** or D |
+| Recording with background noise / uneven volume | **D** |
+| Backend rejects `.ogg` | E |
+| Want to keep listenable archive | F |
+
 ## CLI Usage
 
 You can also use the CLI directly:

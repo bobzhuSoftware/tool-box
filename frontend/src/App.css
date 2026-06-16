@@ -448,6 +448,128 @@
   background: #fdecea;
 }
 
+/* --- FFmpeg helper (extract audio before upload) --- */
+.ffmpeg-helper {
+  margin-top: 0.75rem;
+  border: 1px solid #e5e5ef;
+  border-radius: 8px;
+  background: #fafafe;
+}
+
+.ffmpeg-helper-toggle {
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0.6rem 0.9rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  color: #1a1a2e;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+.ffmpeg-helper-toggle:hover {
+  background: #f0f0ff;
+}
+
+.ffmpeg-helper-sub {
+  color: #888;
+  font-weight: 400;
+  font-size: 0.78rem;
+}
+
+.ffmpeg-helper-body {
+  padding: 0.25rem 0.9rem 0.9rem;
+  border-top: 1px solid #ececf6;
+}
+
+.ffmpeg-helper-intro {
+  font-size: 0.82rem;
+  color: #555;
+  margin: 0.6rem 0 0.9rem;
+  line-height: 1.5;
+}
+
+.ffmpeg-helper-intro code {
+  background: #eee;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}
+
+.ffmpeg-preset {
+  margin-bottom: 0.85rem;
+  padding: 0.6rem 0.75rem;
+  background: #fff;
+  border: 1px solid #ececf6;
+  border-radius: 6px;
+}
+
+.ffmpeg-preset:last-child {
+  margin-bottom: 0;
+}
+
+.ffmpeg-preset-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.ffmpeg-preset-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.ffmpeg-preset-desc {
+  margin: 0 0 0.4rem;
+  font-size: 0.78rem;
+  color: #777;
+  line-height: 1.4;
+}
+
+.ffmpeg-preset-cmd {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  background: #1e1e2e;
+  color: #e6e6f0;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-family: 'Cascadia Code', 'Consolas', 'Menlo', monospace;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.ffmpeg-preset-cmd code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+
+.ffmpeg-copy-btn {
+  background: #646cff;
+  color: #fff;
+  border: none;
+  padding: 0.25rem 0.7rem;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.ffmpeg-copy-btn:hover {
+  background: #535bf2;
+}
+
 /* Options row */
 .options-row {
   display: flex;

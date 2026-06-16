@@ -39,7 +39,66 @@ function VideoTranscript({ token, onAuthError }) {
   const [whisperModels, setWhisperModels] = useState([])
   const [showModelManager, setShowModelManager] = useState(false)
   const [modelDownloadProgress, setModelDownloadProgress] = useState({}) // { modelName: { percent, message } }
+  const [showFfmpegHelper, setShowFfmpegHelper] = useState(false)
+  const [copiedPresetKey, setCopiedPresetKey] = useState(null)
   const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
+
+  // FFmpeg presets for shrinking large local videos before upload.
+  // {INPUT} is replaced with the selected file name (or a placeholder).
+  const FFMPEG_PRESETS = [
+    {
+      key: 'A',
+      title: 'A · Minimum size (~10 MB/h)',
+      desc: 'Clean single-speaker audio (podcasts, solo recordings).',
+      cmd: 'ffmpeg -i "{INPUT}" -vn -ac 1 -ar 16000 -c:a libopus -b:a 24k "output.ogg"',
+    },
+    {
+      key: 'B',
+      title: 'B · Balanced (~20 MB/h) — recommended default',
+      desc: 'Best price/quality for transcription. Whisper gains nothing beyond this.',
+      cmd: 'ffmpeg -i "{INPUT}" -vn -ac 1 -ar 16000 -c:a libopus -b:a 48k "output.ogg"',
+    },
+    {
+      key: 'C',
+      title: 'C · Multi-speaker meetings (~30 MB/h)',
+      desc: 'Keeps stereo so quiet remote speakers are not lost in mono downmix. Teams / Zoom.',
+      cmd: 'ffmpeg -i "{INPUT}" -vn -ac 2 -ar 16000 -c:a libopus -b:a 64k "output.ogg"',
+    },
+    {
+      key: 'D',
+      title: 'D · Noisy / uneven volume (~20 MB/h)',
+      desc: 'High-pass + low-pass + EBU R128 loudness normalization. Best for messy recordings.',
+      cmd: 'ffmpeg -i "{INPUT}" -vn -ac 1 -ar 16000 -af "highpass=f=80,lowpass=f=8000,loudnorm=I=-16:TP=-1.5:LRA=11" -c:a libopus -b:a 48k "output.ogg"',
+    },
+    {
+      key: 'E',
+      title: 'E · Maximum compatibility (mp3, ~30 MB/h)',
+      desc: 'Use when the upload target rejects .ogg / Opus.',
+      cmd: 'ffmpeg -i "{INPUT}" -vn -ac 1 -ar 16000 -c:a libmp3lame -b:a 64k "output.mp3"',
+    },
+    {
+      key: 'F',
+      title: 'F · High fidelity (~60-80 MB/h)',
+      desc: 'Stereo 44.1 kHz VBR ~128 kbps. Only when you also want a listenable archive.',
+      cmd: 'ffmpeg -i "{INPUT}" -vn -ac 2 -ar 44100 -c:a libmp3lame -q:a 4 "output.mp3"',
+    },
+  ]
+
+  const renderFfmpegCmd = (cmd) => {
+    const inputName = uploadFile?.name || 'INPUT.mp4'
+    return cmd.replace('{INPUT}', inputName)
+  }
+
+  const copyFfmpegCmd = async (key, cmd) => {
+    try {
+      await navigator.clipboard.writeText(renderFfmpegCmd(cmd))
+      setCopiedPresetKey(key)
+      setTimeout(() => setCopiedPresetKey((k) => (k === key ? null : k)), 1500)
+    } catch {
+      setCopiedPresetKey('error')
+      setTimeout(() => setCopiedPresetKey(null), 1500)
+    }
+  }
 
   const fetchModels = useCallback(async () => {
     try {
@@ -293,7 +352,7 @@ function VideoTranscript({ token, onAuthError }) {
                 <div className="upload-placeholder">
                   <span className="upload-icon">📤</span>
                   <p>Click or drag & drop a video/audio file here</p>
-                  <p className="upload-hint">Supports MP4, MKV, AVI, MP3, WAV, etc.</p>
+                  <p className="upload-hint">Video: MP4, MKV, AVI, MOV, WebM · Audio: MP3, WAV, OGG/Opus, M4A, FLAC</p>
                 </div>
               )}
             </div>
@@ -305,6 +364,50 @@ function VideoTranscript({ token, onAuthError }) {
               >
                 {loading ? 'Transcribing...' : 'Transcribe Uploaded File'}
               </button>
+            </div>
+
+            {/* FFmpeg helper — for large local videos, extract audio first to slash upload size */}
+            <div className="ffmpeg-helper">
+              <button
+                type="button"
+                className="ffmpeg-helper-toggle"
+                onClick={() => setShowFfmpegHelper((v) => !v)}
+              >
+                <span>{showFfmpegHelper ? '▾' : '▸'}</span>
+                <span>Large file? Extract audio first with FFmpeg</span>
+                <span className="ffmpeg-helper-sub">(20-50× smaller upload, same transcript quality)</span>
+              </button>
+
+              {showFfmpegHelper && (
+                <div className="ffmpeg-helper-body">
+                  <p className="ffmpeg-helper-intro">
+                    Run one of these in PowerShell / Terminal where your video lives, then upload the resulting audio file above.
+                    {uploadFile
+                      ? <> Commands below already use <code>{uploadFile.name}</code>.</>
+                      : <> Replace <code>INPUT.mp4</code> with your filename, or pick a file above to auto-fill it.</>}
+                  </p>
+                  {FFMPEG_PRESETS.map((p) => (
+                    <div key={p.key} className="ffmpeg-preset">
+                      <div className="ffmpeg-preset-header">
+                        <span className="ffmpeg-preset-title">{p.title}</span>
+                        <button
+                          type="button"
+                          className="ffmpeg-copy-btn"
+                          onClick={() => copyFfmpegCmd(p.key, p.cmd)}
+                        >
+                          {copiedPresetKey === p.key
+                            ? '✓ Copied'
+                            : copiedPresetKey === 'error'
+                              ? '✕ Failed'
+                              : 'Copy'}
+                        </button>
+                      </div>
+                      <p className="ffmpeg-preset-desc">{p.desc}</p>
+                      <pre className="ffmpeg-preset-cmd"><code>{renderFfmpegCmd(p.cmd)}</code></pre>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         )}
