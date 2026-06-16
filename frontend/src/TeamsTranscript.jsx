@@ -42,6 +42,35 @@ function TeamsTranscript({ token, onAuthError }) {
     window.open(`/api/teams-transcript/download/${result.job_id}${authParam}`, '_blank')
   }
 
+  const handleDownloadSplit = async (chunkMinutes = 30) => {
+    if (!result?.job_id) return
+    try {
+      const authParam = token ? `&token=${encodeURIComponent(token)}` : ''
+      const res = await fetch(
+        `/api/teams-transcript/download/${result.job_id}?chunk_minutes=${chunkMinutes}${authParam}`,
+        { headers: authHeaders() }
+      )
+      if (!res.ok) throw new Error(`Server error ${res.status}`)
+      const blob = await res.blob()
+      const blobUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = blobUrl
+      const disposition = res.headers.get('content-disposition') || ''
+      const rfc5987Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+      const asciiMatch = disposition.match(/filename="([^"]+)"/)
+      const rawName = rfc5987Match
+        ? decodeURIComponent(rfc5987Match[1].trim())
+        : asciiMatch ? asciiMatch[1] : `${result.name || 'transcript'}_split${chunkMinutes}min.zip`
+      a.download = rawName
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      addLog({ type: 'error', message: `Download failed: ${err.message}` })
+    }
+  }
+
   return (
     <>
       <h2 className="tool-page-title">📋 Teams Transcript</h2>
@@ -88,9 +117,18 @@ function TeamsTranscript({ token, onAuthError }) {
               {result.name}.txt{result.lang ? ` · ${result.lang}` : ''}
             </span>
           </div>
-          <button className="btn-primary" onClick={handleDownload}>
-            Download Again
-          </button>
+          <div className="download-row">
+            <button className="btn-primary" onClick={handleDownload}>
+              Download Again
+            </button>
+            <button
+              className="btn-outline"
+              onClick={() => handleDownloadSplit(30)}
+              title="Download as a ZIP of multiple WebVTT files, each covering 30 minutes"
+            >
+              ✂ Split by 30 min (ZIP)
+            </button>
+          </div>
         </div>
       )}
     </>

@@ -67,6 +67,14 @@ function HomePage({ onSelectTool }) {
         '导出 Discord 服务器频道的聊天记录为 HTML 文件。粘贴频道 URL 和 Token 即可开始导出。',
       tags: ['Discord', 'Chat Export', 'HTML'],
     },
+    {
+      id: 'threads',
+      icon: '🧵',
+      title: 'Threads 视频下载',
+      description:
+        '粘贴一个 Threads 帖子链接，把视频下载到本地。支持单个或多视频轮播，仅适用于公开帖子。',
+      tags: ['Threads', 'Video', 'Download'],
+    },
   ]
 
   const q = query.trim().toLowerCase()

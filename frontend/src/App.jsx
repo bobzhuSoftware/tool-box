@@ -9,6 +9,7 @@ import TeamsTranscript from './TeamsTranscript'
 import BookConverter from './BookConverter'
 import WechatExport from './WechatExport'
 import DiscordExport from './DiscordExport'
+import ThreadsDownload from './ThreadsDownload'
 
 function App() {
   // --- Auth state ---
@@ -133,6 +134,7 @@ function App() {
       {currentTool === 'bookconvert' && <BookConverter token={token} onAuthError={handleLogout} />}
       {currentTool === 'wechat' && <WechatExport token={token} onAuthError={handleLogout} />}
       {currentTool === 'discord' && <DiscordExport token={token} onAuthError={handleLogout} />}
+      {currentTool === 'threads' && <ThreadsDownload token={token} onAuthError={handleLogout} />}
     </div>
   )
 }

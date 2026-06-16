@@ -1842,6 +1842,37 @@ async def teams_transcript_stream(req: TeamsTranscriptRequest, user: User = Depe
                 except OSError as exc:
                     yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save VTT: {exc}'})}\n\n"
                     break
+
+                # Persist to history DB so this transcript appears in the
+                # Video Transcript "Recent" list and survives a server restart.
+                try:
+                    with open(_vtt_file_path(job_id), encoding="utf-8") as f:
+                        vtt_content = f.read()
+                    raw_segs = _parse_vtt(vtt_content)
+                    db_segments = [
+                        {
+                            "start": format_timestamp(s["start"]),
+                            "end": format_timestamp(s["end"]),
+                            "text": s["text"],
+                        }
+                        for s in raw_segs
+                    ]
+                    full_text = " ".join(s["text"] for s in raw_segs)
+                    save_to_db(
+                        job_id=job_id,
+                        title=meta.get("name", "transcript"),
+                        url=url,
+                        language=meta.get("lang", "") or "unknown",
+                        model="teams",
+                        text=full_text,
+                        segments=db_segments,
+                        user_id=user.id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Saving to history is best-effort; the VTT cache file
+                    # is still usable for the immediate download.
+                    yield f"data: {json.dumps({'type': 'status', 'message': f'Note: could not save to history ({exc})'})}\n\n"
+
                 yield f"data: {json.dumps({'type': 'done', 'job_id': job_id, 'name': meta.get('name', 'transcript'), 'lang': meta.get('lang', '')})}\n\n"
                 break
             elif event["type"] == "error":
@@ -1862,9 +1893,73 @@ async def teams_transcript_stream(req: TeamsTranscriptRequest, user: User = Depe
     )
 
 
+_VTT_TS_RE = re.compile(
+    r'^(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?\s*-->\s*'
+    r'(\d{1,2}):(\d{2}):(\d{2})(?:[.,](\d{1,3}))?'
+)
+
+
+def _split_vtt_into_chunks(vtt_text: str, chunk_secs: int) -> list[str]:
+    """Split a cleaned WebVTT string into N-second windows.
+
+    Returns a list of VTT-formatted strings (each with its own WEBVTT header).
+    Windows are anchored to the first cue's start time so the first chunk
+    spans [t0, t0+chunk_secs), the next [t0+chunk_secs, t0+2*chunk_secs), etc.
+    """
+    lines = vtt_text.splitlines()
+    cues: list[tuple[float, str]] = []  # (start_sec, "ts_line\ntext_lines...")
+
+    i = 0
+    # Skip lines up to and including the WEBVTT header.
+    while i < len(lines) and not lines[i].strip().startswith("WEBVTT"):
+        i += 1
+    if i < len(lines):
+        i += 1
+
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        m = _VTT_TS_RE.match(line)
+        if not m:
+            # Stray line — skip
+            i += 1
+            continue
+        h, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        ms = int(m.group(4) or 0)
+        start_sec = h * 3600 + mm * 60 + ss + ms / 1000.0
+        ts_line = line
+        i += 1
+        text_lines: list[str] = []
+        while i < len(lines) and lines[i].strip():
+            text_lines.append(lines[i])
+            i += 1
+        cue_block = ts_line + "\n" + "\n".join(text_lines)
+        cues.append((start_sec, cue_block))
+
+    if not cues:
+        return ["WEBVTT\n\n" + vtt_text.strip() + "\n"]
+
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    chunk_start_sec = cues[0][0]
+    for start_sec, block in cues:
+        if current and (start_sec - chunk_start_sec) >= chunk_secs:
+            chunks.append(current)
+            current = []
+            chunk_start_sec = start_sec
+        current.append(block)
+    if current:
+        chunks.append(current)
+
+    return ["WEBVTT\n\n" + "\n\n".join(blocks) + "\n" for blocks in chunks]
+
+
 @app.get("/api/teams-transcript/download/{job_id}")
 def download_vtt(
     job_id: str,
+    chunk_minutes: int = 0,
     token: str | None = None,
     user: User | None = Depends(get_current_user),
 ):
@@ -1892,9 +1987,33 @@ def download_vtt(
     if meta.get("user_id") != user.id:
         raise HTTPException(status_code=404, detail="Transcript not found or expired")
 
-    name = re.sub(r'[\\/:*?"<>|]', "_", meta.get("name", "transcript"))
-    filename = f"{name}.txt"
+    name = re.sub(r'[\\/:*?"<>|]', "_", meta.get("name", "transcript")) or "transcript"
 
+    if chunk_minutes > 0:
+        with open(vtt_file, encoding="utf-8") as f:
+            vtt_text = f.read()
+        parts = _split_vtt_into_chunks(vtt_text, chunk_minutes * 60)
+        total = len(parts)
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for idx, body in enumerate(parts, 1):
+                part_name = f"{name}_part{idx:02d}_of{total:02d}.txt"
+                zf.writestr(part_name, body)
+        zip_filename = f"{name}_split{chunk_minutes}min.zip"
+        ascii_zip = zip_filename.encode("ascii", "ignore").decode("ascii") or "transcript.zip"
+        encoded_zip = quote(zip_filename, safe="")
+        return Response(
+            content=zip_buffer.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_zip}"; '
+                    f"filename*=UTF-8''{encoded_zip}"
+                )
+            },
+        )
+
+    filename = f"{name}.txt"
     return FileResponse(vtt_file, media_type="text/plain", filename=filename)
 
 
@@ -2358,6 +2477,216 @@ def download_discord(
 
     filename = meta.get("filename", "discord_export.html")
     return FileResponse(html_path, media_type="text/html; charset=utf-8", filename=filename)
+
+
+# ---------------------------------------------------------------------------
+# Threads Video Download
+# ---------------------------------------------------------------------------
+_THREADS_CACHE_DIR = os.path.join(tempfile.gettempdir(), "vt_threads_cache")
+os.makedirs(_THREADS_CACHE_DIR, exist_ok=True)
+
+
+def _threads_job_dir(job_id: str) -> str:
+    return os.path.join(_THREADS_CACHE_DIR, job_id)
+
+
+def _threads_meta_path(job_id: str) -> str:
+    return os.path.join(_THREADS_CACHE_DIR, f"{job_id}.json")
+
+
+def _cleanup_old_threads(max_age_seconds: int = 3600) -> None:
+    """Delete Threads cache job dirs / meta files older than max_age_seconds."""
+    now = datetime.now().timestamp()
+    for fname in os.listdir(_THREADS_CACHE_DIR):
+        fpath = os.path.join(_THREADS_CACHE_DIR, fname)
+        try:
+            if now - os.path.getmtime(fpath) > max_age_seconds:
+                if os.path.isdir(fpath):
+                    shutil.rmtree(fpath, ignore_errors=True)
+                else:
+                    os.unlink(fpath)
+        except OSError:
+            pass
+
+
+class ThreadsDownloadRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/threads/stream")
+async def threads_stream(req: ThreadsDownloadRequest, user: User = Depends(require_user)):
+    import subprocess as _sp
+    import sys as _sys
+
+    url = req.url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    q: stdlib_queue.Queue = stdlib_queue.Queue()
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = _threads_job_dir(job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    def run_worker():
+        worker = os.path.join(os.path.dirname(__file__), "threads_worker.py")
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        try:
+            proc = _sp.Popen(
+                [_sys.executable, worker, url, job_dir],
+                stdout=_sp.PIPE, stderr=_sp.PIPE,
+                text=True, encoding="utf-8", env=_env,
+            )
+
+            stderr_lines: list = []
+
+            def _drain_stderr():
+                for ln in proc.stderr:
+                    stderr_lines.append(ln)
+
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip("\n")
+                if line.startswith("STATUS:"):
+                    q.put({"type": "status", "message": line[7:]})
+                elif line.startswith("PROGRESS:"):
+                    q.put({"type": "progress", "message": line[9:]})
+                elif line.startswith("DONE:"):
+                    try:
+                        data = json.loads(line[5:])
+                    except (json.JSONDecodeError, ValueError):
+                        data = {}
+                    q.put({"type": "_done_marker", "data": data})
+                elif line.startswith("ERROR:"):
+                    q.put({"type": "error", "message": line[6:]})
+
+            proc.wait()
+            stderr_thread.join(timeout=5)
+            if proc.returncode != 0 and not any(
+                e["type"] in ("_done_marker", "error") for e in list(q.queue)
+            ):
+                stderr_out = "".join(stderr_lines).strip()
+                q.put({"type": "error", "message": (stderr_out[-400:] if stderr_out else "Worker process failed")})
+        except Exception as e:  # noqa: BLE001
+            q.put({"type": "error", "message": str(e)})
+
+    thread = threading.Thread(target=run_worker, daemon=True)
+    thread.start()
+
+    async def generate():
+        while True:
+            try:
+                event = q.get_nowait()
+            except stdlib_queue.Empty:
+                await asyncio.sleep(0.15)
+                continue
+
+            if event["type"] == "_done_marker":
+                data = event.get("data", {})
+                meta = {
+                    "user_id": user.id,
+                    "url": url,
+                    "title": data.get("title", "threads_video"),
+                    "uploader": data.get("uploader", ""),
+                    "files": data.get("files", []),
+                    "count": data.get("count", 0),
+                }
+                try:
+                    with open(_threads_meta_path(job_id), "w", encoding="utf-8") as f:
+                        json.dump(meta, f, ensure_ascii=False)
+                except OSError as exc:
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save metadata: {exc}'})}\n\n"
+                    break
+                yield f"data: {json.dumps({'type': 'done', 'job_id': job_id, 'title': meta['title'], 'uploader': meta['uploader'], 'count': meta['count']}, ensure_ascii=False)}\n\n"
+                break
+            elif event["type"] == "error":
+                shutil.rmtree(job_dir, ignore_errors=True)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                break
+            else:
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/threads/download/{job_id}")
+def download_threads(
+    job_id: str,
+    token: str | None = None,
+    user: User | None = Depends(get_current_user),
+):
+    if user is None and token:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            uid = payload.get("sub")
+            if uid:
+                with Session(engine) as s:
+                    user = s.get(User, uid)
+        except JWTError:
+            pass
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    _cleanup_old_threads()
+    meta_path = _threads_meta_path(job_id)
+    job_dir = _threads_job_dir(job_id)
+    if not os.path.isfile(meta_path) or not os.path.isdir(job_dir):
+        raise HTTPException(status_code=404, detail="Download not found or expired")
+
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    if meta.get("user_id") != user.id:
+        raise HTTPException(status_code=404, detail="Download not found or expired")
+
+    files = [f for f in meta.get("files", []) if os.path.isfile(os.path.join(job_dir, f))]
+    if not files:
+        raise HTTPException(status_code=404, detail="No video files found")
+
+    safe_title = re.sub(r'[\\/:*?"<>|]', "_", meta.get("title", "threads_video")).strip()
+    safe_title = (safe_title[:80] or "threads_video")
+
+    if len(files) == 1:
+        single = os.path.join(job_dir, files[0])
+        ext = os.path.splitext(files[0])[1] or ".mp4"
+        download_name = f"{safe_title}{ext}"
+        ascii_name = download_name.encode("ascii", "ignore").decode("ascii") or f"threads_video{ext}"
+        encoded = quote(download_name, safe="")
+        return FileResponse(
+            single,
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{encoded}"
+                )
+            },
+        )
+
+    # Multiple videos → zip on-the-fly
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in files:
+            zf.write(os.path.join(job_dir, fname), fname)
+    zip_filename = f"{safe_title}.zip"
+    ascii_zip = zip_filename.encode("ascii", "ignore").decode("ascii") or "threads_videos.zip"
+    encoded_zip = quote(zip_filename, safe="")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_zip}"; '
+                f"filename*=UTF-8''{encoded_zip}"
+            )
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
