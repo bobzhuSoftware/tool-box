@@ -12,68 +12,17 @@ Progress is written to stdout as:
 import asyncio
 import io
 import json
-import os
 import re
 import shutil
 import sys
-import tempfile
 from urllib.parse import urlparse, quote, unquote
 
 # Force UTF-8 stdout so the server can decode our STATUS/DONE/ERROR lines correctly
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
-EDGE_USER_DATA = r"C:\Users\BOBZHU01\AppData\Local\Microsoft\Edge\User Data"
-EDGE_PROFILE = "Profile 1"   # bob.zhu@dsv.com
-
-
-def _copy_profile_to_temp() -> tuple[str, str]:
-    """
-    Copy the Edge profile to a temp directory so Playwright can use it
-    even while Edge is still running with the original profile.
-
-    Returns (temp_user_data_dir, profile_name_to_use).
-    The profile is placed under a fresh user-data dir as "Default"
-    (Playwright's persistent context always uses whatever profile dir you point it at).
-    """
-    src_profile = os.path.join(EDGE_USER_DATA, EDGE_PROFILE)
-    tmp_dir = tempfile.mkdtemp(prefix="edge_pw_")
-    dst_profile = os.path.join(tmp_dir, "Default")
-
-    # Copy only the files that matter for auth cookies.
-    # Copying the full profile would be slow; we only need Cookies + Network Persistent State.
-    os.makedirs(dst_profile, exist_ok=True)
-    for fname in ("Cookies", "Network Persistent State", "Preferences",
-                  "Secure Preferences", "Local State"):
-        src = os.path.join(src_profile, fname)
-        if os.path.isfile(src):
-            try:
-                shutil.copy2(src, os.path.join(dst_profile, fname))
-            except OSError:
-                pass  # file locked — skip, auth will still work via remaining cookies
-
-    # Newer Edge versions (post-2023) store Cookies under a Network/ subdirectory.
-    # Copy that whole subdirectory if it exists.
-    network_src = os.path.join(src_profile, "Network")
-    if os.path.isdir(network_src):
-        network_dst = os.path.join(dst_profile, "Network")
-        os.makedirs(network_dst, exist_ok=True)
-        for fname in os.listdir(network_src):
-            src = os.path.join(network_src, fname)
-            if os.path.isfile(src):
-                try:
-                    shutil.copy2(src, os.path.join(network_dst, fname))
-                except OSError:
-                    pass
-
-    # Local State lives one level up (user data dir root)
-    local_state_src = os.path.join(EDGE_USER_DATA, "Local State")
-    if os.path.isfile(local_state_src):
-        try:
-            shutil.copy2(local_state_src, os.path.join(tmp_dir, "Local State"))
-        except OSError:
-            pass
-
-    return tmp_dir, "Default"
+# Profile/auth handling lives in browser_utils so it works on any machine that
+# has Edge installed (no hard-coded user name or profile).
+from browser_utils import copy_profile_to_temp as _copy_profile_to_temp  # noqa: E402
 
 # ---- UUID cue-identifier pattern ----------------------------------------
 # Matches lines like: aca214ba-5200-4ec1-8bbe-66c314ec0a0e/119-0

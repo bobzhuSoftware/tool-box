@@ -6,6 +6,7 @@ import WebToPdf from './WebToPdf'
 import WebToPdf2 from './WebToPdf2'
 import DsvPagePdf from './DsvPagePdf'
 import TeamsTranscript from './TeamsTranscript'
+import TeamsChat from './TeamsChat'
 import BookConverter from './BookConverter'
 import WechatExport from './WechatExport'
 import DiscordExport from './DiscordExport'
@@ -131,6 +132,7 @@ function App() {
       {currentTool === 'webtopdf2' && <WebToPdf2 token={token} onAuthError={handleLogout} />}
       {currentTool === 'dsvpdf' && <DsvPagePdf token={token} onAuthError={handleLogout} />}
       {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
+      {currentTool === 'teamschat' && <TeamsChat token={token} onAuthError={handleLogout} />}
       {currentTool === 'bookconvert' && <BookConverter token={token} onAuthError={handleLogout} />}
       {currentTool === 'wechat' && <WechatExport token={token} onAuthError={handleLogout} />}
       {currentTool === 'discord' && <DiscordExport token={token} onAuthError={handleLogout} />}

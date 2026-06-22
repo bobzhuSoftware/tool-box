@@ -44,6 +44,14 @@ function HomePage({ onSelectTool }) {
       tags: ['Teams', 'SharePoint', 'VTT'],
     },
     {
+      id: 'teamschat',
+      icon: '💼',
+      title: 'Teams 聊天记录导出',
+      description:
+        '通过已登录的 Edge 会话抓取 Teams 网页版聊天记录，选择聊天后导出为 HTML/TXT 文件。需要已在 Edge 登录 Teams。',
+      tags: ['Teams', '聊天记录', 'Export'],
+    },
+    {
       id: 'bookconvert',
       icon: '📚',
       title: 'Book Format Converter',

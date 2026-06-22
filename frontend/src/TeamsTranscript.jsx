@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import useSSEStream from './useSSEStream'
+import EdgeProfilePicker from './EdgeProfilePicker'
 
 function TeamsTranscript({ token, onAuthError }) {
   const [url, setUrl] = useState('')
@@ -93,8 +94,9 @@ function TeamsTranscript({ token, onAuthError }) {
           </button>
         </div>
         <p style={{ fontSize: '13px', color: 'var(--text-muted, #888)', marginTop: '8px' }}>
-          Uses your DSV Edge browser session (bob.zhu@dsv.com). Edge must be closed before running.
+          Uses your signed-in Edge browser session. Pick the account below; Edge must be closed before running.
         </p>
+        <EdgeProfilePicker token={token} onAuthError={onAuthError} />
       </div>
 
       {progressLog.length > 0 && (
