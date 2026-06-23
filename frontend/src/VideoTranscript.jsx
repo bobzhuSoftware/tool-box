@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import useSSEStream from './useSSEStream'
+import CookieSettings from './CookieSettings'
 
 function formatDate(iso) {
   const d = new Date(iso)
@@ -312,6 +313,7 @@ function VideoTranscript({ token, onAuthError }) {
                 {loading ? 'Transcribing...' : 'Transcribe'}
               </button>
             </div>
+            <CookieSettings token={token} onAuthError={onAuthError} />
           </>
         ) : (
           <>

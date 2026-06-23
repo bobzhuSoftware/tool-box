@@ -3,7 +3,6 @@ import './App.css'
 import HomePage from './HomePage'
 import VideoTranscript from './VideoTranscript'
 import WebToPdf from './WebToPdf'
-import WebToPdf2 from './WebToPdf2'
 import DsvPagePdf from './DsvPagePdf'
 import TeamsTranscript from './TeamsTranscript'
 import TeamsChat from './TeamsChat'
@@ -129,7 +128,6 @@ function App() {
       {currentTool === null && <HomePage onSelectTool={setCurrentTool} />}
       {currentTool === 'transcript' && <VideoTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'webtopdf' && <WebToPdf token={token} onAuthError={handleLogout} />}
-      {currentTool === 'webtopdf2' && <WebToPdf2 token={token} onAuthError={handleLogout} />}
       {currentTool === 'dsvpdf' && <DsvPagePdf token={token} onAuthError={handleLogout} />}
       {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'teamschat' && <TeamsChat token={token} onAuthError={handleLogout} />}

@@ -31,8 +31,35 @@ CLOUDCONVERT_API_KEY = os.environ.get("CLOUDCONVERT_API_KEY", "")
 ZAMZAR_API_KEY = os.environ.get("ZAMZAR_API_KEY", "")
 
 
-def _find_ebook_convert() -> str | None:
-    """Return path to ebook-convert executable, or None if not found."""
+def _resolve_calibre_candidate(custom: str) -> str | None:
+    """Resolve a user-supplied Calibre location.
+
+    ``custom`` may point directly at the ``ebook-convert`` executable or at the
+    Calibre install directory that contains it.
+    """
+    custom = custom.strip().strip('"')
+    if not custom:
+        return None
+    if os.path.isfile(custom):
+        return custom
+    if os.path.isdir(custom):
+        exe_name = "ebook-convert.exe" if sys.platform == "win32" else "ebook-convert"
+        cand = os.path.join(custom, exe_name)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _find_ebook_convert(custom_path: str | None = None) -> str | None:
+    """Return path to ebook-convert executable, or None if not found.
+
+    Resolution order: explicit ``custom_path`` / ``VT_CALIBRE_PATH`` env (a file
+    or install dir) -> PATH -> common install locations.
+    """
+    custom = custom_path or os.environ.get("VT_CALIBRE_PATH", "")
+    resolved = _resolve_calibre_candidate(custom) if custom else None
+    if resolved:
+        return resolved
     exe = shutil.which("ebook-convert")
     if exe:
         return exe

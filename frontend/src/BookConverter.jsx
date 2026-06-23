@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import useSSEStream from './useSSEStream'
+import CalibreStatus from './CalibreStatus'
 
 const DIRECTIONS = [
   { value: 'epub2pdf', label: 'EPUB → PDF', accept: '.epub', srcLabel: 'EPUB', dstLabel: 'PDF', icon: '📚' },
@@ -135,6 +136,11 @@ function BookConverter({ token, onAuthError }) {
             ))}
           </div>
         </div>
+
+        {/* Calibre engine status — EPUB → PDF relies on Calibre's ebook-convert */}
+        {direction === 'epub2pdf' && (
+          <CalibreStatus token={token} onAuthError={onAuthError} />
+        )}
 
         {/* File input — click or drag & drop */}
         <div>

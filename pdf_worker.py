@@ -15,6 +15,31 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 
+def _resolve_firefox_profile():
+    """Resolve which Firefox profile dir to use for X/Twitter.
+
+    Priority: VT_FIREFOX_PROFILE (injected by server.py from the user's saved
+    choice) -> a 'default-release' profile -> the first available profile.
+    Returns the absolute profile path, or None if none is found. Keeping the
+    fallback identical to the previous behaviour means nothing breaks when the
+    env var is unset (e.g. older frontend, first run).
+    """
+    ff_root = os.path.expandvars(r"%APPDATA%\Mozilla\Firefox\Profiles")
+    choice = os.environ.get("VT_FIREFOX_PROFILE", "").strip()
+    if choice:
+        cand = choice if os.path.isabs(choice) else os.path.join(ff_root, choice)
+        if os.path.isdir(cand):
+            return cand
+    if not os.path.isdir(ff_root):
+        return None
+    try:
+        dirs = sorted(e.path for e in os.scandir(ff_root) if e.is_dir())
+    except OSError:
+        return None
+    for path in dirs:
+        if "default-release" in os.path.basename(path):
+            return path
+    return dirs[0] if dirs else None
 
 
 def _read_firefox_cookies(url: str) -> list:
@@ -32,18 +57,7 @@ def _read_firefox_cookies(url: str) -> list:
     if not os.path.isdir(ff_root):
         return []
 
-    ff_profile = None
-    try:
-        for entry in sorted(os.scandir(ff_root), key=lambda e: e.name):
-            if entry.is_dir() and "default-release" in entry.name:
-                ff_profile = entry.path
-                break
-        if ff_profile is None:
-            dirs = [e.path for e in os.scandir(ff_root) if e.is_dir()]
-            ff_profile = dirs[0] if dirs else None
-    except OSError:
-        return []
-
+    ff_profile = _resolve_firefox_profile()
     if not ff_profile:
         return []
 
@@ -678,18 +692,7 @@ def main():
             # Firefox loads the full authenticated session — no cookie injection
             # needed, this is the closest thing to "just use your Firefox".
             # ----------------------------------------------------------------
-            ff_root = os.path.expandvars(r"%APPDATA%\Mozilla\Firefox\Profiles")
-            ff_profile = None
-            try:
-                for entry in sorted(os.scandir(ff_root), key=lambda e: e.name):
-                    if entry.is_dir() and "default-release" in entry.name:
-                        ff_profile = entry.path
-                        break
-                if ff_profile is None:
-                    dirs = [e.path for e in os.scandir(ff_root) if e.is_dir()]
-                    ff_profile = dirs[0] if dirs else None
-            except OSError:
-                pass
+            ff_profile = _resolve_firefox_profile()
 
             tmp_prof = os.path.join(tempfile.gettempdir(), "vt_ff_minprof")
             shutil.rmtree(tmp_prof, ignore_errors=True)

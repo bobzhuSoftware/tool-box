@@ -482,15 +482,148 @@ def download_whisper_model_stream(model_name: str):
 _COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 _COOKIES_BROWSER = os.environ.get("YOUTUBE_COOKIES_BROWSER")  # e.g. "chrome", "firefox"
 
+# Browsers yt-dlp can read cookies from directly (used by the per-user picker).
+_SUPPORTED_COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave", "chromium", "opera", "vivaldi")
 
-def _apply_cookies(ydl_opts: dict) -> None:
+# JavaScript runtimes yt-dlp uses to solve YouTube's signature / n-challenge.
+# Without one, YouTube returns only storyboard images and downloads fail with
+# "Requested format is not available". Deno is yt-dlp's built-in default; we also
+# enable Node (commonly installed) as a fallback so it works on machines without
+# Deno. Requires the yt-dlp-ejs scripts (installed via the yt-dlp[default] extra).
+# Override with VT_JS_RUNTIMES, e.g. "deno,node" or "node:/path/to/node".
+def _parse_js_runtimes(spec: str) -> dict:
+    """Parse a 'name[:path],name[:path]' spec into yt-dlp's {name: {config}} dict."""
+    runtimes: dict = {}
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, _, path = entry.partition(":")
+        name = name.strip().lower()
+        path = path.strip()
+        if name:
+            runtimes[name] = {"path": path} if path else {}
+    return runtimes
+
+
+_JS_RUNTIMES = _parse_js_runtimes(os.environ.get("VT_JS_RUNTIMES", "deno,node"))
+
+
+def _secret_fernet():
+    """Build a Fernet cipher from SECRET_KEY for encrypting stored cookies.
+
+    Returns None if the cryptography backend is unavailable, in which case the
+    caller falls back to plaintext storage (same as discord_token).
+    """
+    try:
+        import base64
+        import hashlib
+        from cryptography.fernet import Fernet
+
+        key = base64.urlsafe_b64encode(hashlib.sha256(SECRET_KEY.encode()).digest())
+        return Fernet(key)
+    except Exception:
+        return None
+
+
+def _encrypt_secret(text: str) -> str:
+    """Encrypt sensitive text for at-rest storage (prefixed 'enc:')."""
+    f = _secret_fernet()
+    if f is None:
+        return text
+    try:
+        return "enc:" + f.encrypt(text.encode("utf-8")).decode("ascii")
+    except Exception:
+        return text
+
+
+def _decrypt_secret(stored: str | None) -> str:
+    """Inverse of _encrypt_secret; tolerates legacy plaintext values."""
+    if not stored:
+        return ""
+    if not stored.startswith("enc:"):
+        return stored  # legacy plaintext
+    f = _secret_fernet()
+    if f is None:
+        return ""
+    try:
+        return f.decrypt(stored[4:].encode("ascii")).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _jar_from_text(text: str):
+    """Parse pasted Netscape-format cookies.txt into a read-only cookie jar.
+
+    Returns a MozillaCookieJar (with save disabled) or None if the text is not
+    valid Netscape cookie data.
+    """
+    if not text or ("# Netscape" not in text and "\t" not in text):
+        return None
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+    try:
+        tmp.write(text)
+        tmp.close()
+        jar = http.cookiejar.MozillaCookieJar()
+        jar.load(tmp.name, ignore_discard=True, ignore_expires=True)
+        jar.save = lambda *a, **kw: None  # never write back
+        return jar
+    except (OSError, http.cookiejar.LoadError):
+        return None
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+def _parse_browser_spec(spec: str) -> tuple:
+    """Turn 'chrome' or 'chrome:Default' into yt-dlp's cookiesfrombrowser tuple."""
+    browser, _, profile = spec.partition(":")
+    return (browser.strip().lower(), profile.strip() or None, None, None)
+
+
+def _summarize_cookies(text: str) -> dict:
+    """Return non-sensitive metadata about a cookies.txt blob for the UI."""
+    jar = _jar_from_text(text)
+    if jar is None:
+        return {"cookie_count": 0, "domains": []}
+    domains = sorted({c.domain.lstrip(".") for c in jar})
+    return {"cookie_count": len(list(jar)), "domains": domains}
+
+
+def _apply_cookies(ydl_opts: dict, user_id: str | None = None) -> None:
     """Inject cookie configuration into yt-dlp options if available.
 
-    Instead of passing a file path (which yt-dlp will try to *write back*,
-    causing Permission Denied on Windows), we load the cookies into a
-    MozillaCookieJar with its save method disabled and pass the jar object.
-    This way yt-dlp can read cookies but never attempts a file write.
+    Resolution order:
+      1. The user's pasted cookies.txt (encrypted per-user setting).
+      2. The user's chosen local browser (per-user setting).
+      3. Legacy global cookies.txt in the project root.
+      4. Legacy global YOUTUBE_COOKIES_BROWSER env var.
+
+    Pasted cookies are loaded into a MozillaCookieJar with its save method
+    disabled so yt-dlp can read but never write them (avoids Windows
+    Permission Denied on write-back).
     """
+    # Enable JS runtimes so yt-dlp can solve YouTube's n-challenge / signature
+    # (otherwise only storyboard images are returned and audio extraction fails).
+    if _JS_RUNTIMES:
+        ydl_opts.setdefault("js_runtimes", {k: dict(v) for k, v in _JS_RUNTIMES.items()})
+
+    # 1 & 2: per-user configuration
+    if user_id:
+        text = _decrypt_secret(_get_user_setting(user_id, "yt_cookies"))
+        if text:
+            jar = _jar_from_text(text)
+            if jar is not None:
+                ydl_opts["cookiejar"] = jar
+                return
+        browser = _get_user_setting(user_id, "yt_cookies_browser")
+        if browser:
+            ydl_opts["cookiesfrombrowser"] = _parse_browser_spec(browser)
+            return
+
+    # 3 & 4: legacy global fallbacks (keep existing deployments working)
     if os.path.isfile(_COOKIES_FILE):
         try:
             jar = http.cookiejar.MozillaCookieJar()
@@ -504,7 +637,7 @@ def _apply_cookies(ydl_opts: dict) -> None:
         ydl_opts["cookiesfrombrowser"] = (_COOKIES_BROWSER,)
 
 
-def download_audio(video_url: str, output_dir: str) -> str:
+def download_audio(video_url: str, output_dir: str, user_id: str | None = None) -> str:
     output_template = os.path.join(output_dir, "audio.%(ext)s")
     ydl_opts = {
         "format": "bestaudio/best",
@@ -520,7 +653,7 @@ def download_audio(video_url: str, output_dir: str) -> str:
     }
     if FFMPEG_LOCATION:
         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
-    _apply_cookies(ydl_opts)
+    _apply_cookies(ydl_opts, user_id)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
     audio_path = os.path.join(output_dir, "audio.mp3")
@@ -613,6 +746,7 @@ def _extract_captions(
     language_pref: str | None,
     tmp_dir: str,
     q: stdlib_queue.Queue,
+    user_id: str | None = None,
 ) -> tuple[list[dict], str, str]:
     """
     Try to extract existing subtitles/captions from a video URL using yt-dlp.
@@ -647,7 +781,7 @@ def _extract_captions(
     q.put({"type": "status", "message": "Checking for available captions..."})
 
     info_opts: dict = {"quiet": True, "skip_download": True}
-    _apply_cookies(info_opts)
+    _apply_cookies(info_opts, user_id)
     with yt_dlp.YoutubeDL(info_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
@@ -713,7 +847,7 @@ def _extract_captions(
         "subtitlesformat": "vtt",
         "outtmpl": os.path.join(tmp_dir, "sub.%(ext)s"),
     }
-    _apply_cookies(dl_opts)
+    _apply_cookies(dl_opts, user_id)
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
         ydl.download([url])
 
@@ -776,7 +910,7 @@ def merge_segments(
 def transcribe(req: TranscribeRequest, user: User = Depends(require_user)):
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            audio_path = download_audio(req.url, tmp_dir)
+            audio_path = download_audio(req.url, tmp_dir, user.id)
             model = _get_whisper_model(req.model)
             options = {}
             if req.language:
@@ -991,7 +1125,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                     }
                     if FFMPEG_LOCATION:
                         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
-                    _apply_cookies(ydl_opts)
+                    _apply_cookies(ydl_opts, user_id)
 
                     video_title_w = title_hint
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1029,7 +1163,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                 if mode == "captions":
                     # Captions only — fail loudly if none found
                     raw_segs, detected_lang, video_title = _extract_captions(
-                        req.url, req.language, tmp_dir, q
+                        req.url, req.language, tmp_dir, q, user_id
                     )
                     segments = merge_segments(raw_segs)
                     source = "captions"
@@ -1043,7 +1177,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                     # mode == "auto" — try captions first, fall back to Whisper
                     try:
                         raw_segs, detected_lang, video_title = _extract_captions(
-                            req.url, req.language, tmp_dir, q
+                            req.url, req.language, tmp_dir, q, user_id
                         )
                         segments = merge_segments(raw_segs)
                         source = "captions"
@@ -1253,6 +1387,10 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
     if not _URL_PATTERN.match(url):
         raise HTTPException(status_code=400, detail="Only http:// and https:// URLs are supported")
 
+    # For X/Twitter mode, resolve the user's chosen Firefox profile up-front
+    # (require_user / DB access must happen outside the worker thread closure).
+    firefox_profile = _get_user_setting(user.id, "firefox_profile") if req.is_x else None
+
     q: stdlib_queue.Queue = stdlib_queue.Queue()
 
     def run_worker():
@@ -1263,6 +1401,10 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
         tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
         tmp.close()
 
+        _env = os.environ.copy()
+        if firefox_profile:
+            _env["VT_FIREFOX_PROFILE"] = firefox_profile
+
         try:
             proc = subprocess.Popen(
                 [_sys.executable, worker, url, tmp.name, "1" if req.is_x else "0"],
@@ -1270,6 +1412,7 @@ async def pdf_stream(req: PdfRequest, user: User = Depends(require_user)):
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                env=_env,
             )
             # Drain stderr in a background thread to prevent the subprocess
             # from blocking when its stderr pipe buffer fills up (e.g. Firefox
@@ -1388,106 +1531,6 @@ def download_pdf(
         pdf_file,
         media_type="application/pdf",
         filename=filename,
-    )
-
-
-# ---------------------------------------------------------------------------
-# PDF2: Readability-based clean article extraction
-# ---------------------------------------------------------------------------
-class Pdf2Request(BaseModel):
-    url: str
-
-
-@app.post("/api/pdf2/stream")
-async def pdf2_stream(req: Pdf2Request, user: User = Depends(require_user)):
-    url = req.url.strip()
-    if not _URL_PATTERN.match(url):
-        raise HTTPException(status_code=400, detail="Only http:// and https:// URLs are supported")
-
-    q: stdlib_queue.Queue = stdlib_queue.Queue()
-
-    def run_worker():
-        import subprocess
-        import sys as _sys
-
-        worker = os.path.join(os.path.dirname(__file__), "pdf2_worker.py")
-        tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        tmp.close()
-
-        try:
-            proc = subprocess.Popen(
-                [_sys.executable, worker, url, tmp.name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-            )
-            # Drain stderr in a background thread to prevent the subprocess
-            # from blocking when its stderr pipe buffer fills up.
-            stderr_lines: list = []
-            def _drain_stderr():
-                for ln in proc.stderr:
-                    stderr_lines.append(ln)
-            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-            stderr_thread.start()
-
-            captured_title = ""
-            for raw_line in proc.stdout:
-                line = raw_line.strip()
-                if line.startswith("STATUS:"):
-                    q.put({"type": "status", "message": line[7:]})
-                elif line.startswith("TITLE:"):
-                    captured_title = line[6:]
-                elif line == "DONE":
-                    q.put({"type": "_done_marker", "path": tmp.name, "title": captured_title})
-            proc.wait()
-            stderr_thread.join(timeout=5)
-            if proc.returncode != 0:
-                stderr_out = "".join(stderr_lines)
-                # Ignore benign asyncio ProactorEventLoop cleanup noise on Windows.
-                real_errors = "\n".join(
-                    ln for ln in stderr_out.splitlines()
-                    if "Exception ignored in" not in ln
-                    and "proactor_events" not in ln
-                    and "windows_utils" not in ln
-                    and "I/O operation on closed pipe" not in ln
-                ).strip()
-                if real_errors:
-                    q.put({"type": "error", "message": f"PDF generation failed: {real_errors[-400:]}"})
-        except Exception as e:
-            q.put({"type": "error", "message": str(e)})
-
-    thread = threading.Thread(target=run_worker, daemon=True)
-    thread.start()
-
-    async def generate():
-        job_id = uuid.uuid4().hex[:12]
-        while True:
-            try:
-                event = q.get_nowait()
-            except stdlib_queue.Empty:
-                await asyncio.sleep(0.15)
-                continue
-
-            if event["type"] == "_done_marker":
-                pdf_path = event["path"]
-                article_title = event.get("title", "")
-                try:
-                    _save_pdf_job(job_id, pdf_path, user.id, url, article_title)
-                except OSError as exc:
-                    yield f"data: {json.dumps({'type': 'error', 'message': f'Failed to save PDF: {exc}'})}\n\n"
-                    break
-                yield f"data: {json.dumps({'type': 'done', 'job_id': job_id})}\n\n"
-                break
-            else:
-                yield f"data: {json.dumps(event)}\n\n"
-                if event["type"] == "error":
-                    break
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -1622,6 +1665,7 @@ async def book_convert(
 
     q: stdlib_queue.Queue = stdlib_queue.Queue()
     user_id = user.id
+    calibre_path = _get_user_setting(user.id, "calibre_path") or ""
 
     def run_worker():
         import subprocess
@@ -1630,6 +1674,11 @@ async def book_convert(
         worker = os.path.join(os.path.dirname(__file__), "book_converter_worker.py")
         stderr_lines: list[str] = []
 
+        _env = os.environ.copy()
+        _env["PYTHONIOENCODING"] = "utf-8"
+        if calibre_path:
+            _env["VT_CALIBRE_PATH"] = calibre_path
+
         try:
             proc = subprocess.Popen(
                 [_sys.executable, worker, tmp_input.name, tmp_output.name, direction],
@@ -1637,6 +1686,7 @@ async def book_convert(
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                env=_env,
             )
 
             def _drain_stderr():
@@ -1737,6 +1787,66 @@ def book_download(
     ext = os.path.splitext(filename)[1].lower()
     media_type = "application/epub+zip" if ext == ".epub" else "application/pdf"
     return FileResponse(file_path, media_type=media_type, filename=filename)
+
+
+# ---------------------------------------------------------------------------
+# Calibre detection / per-user path (EPUB → PDF engine)
+# ---------------------------------------------------------------------------
+CALIBRE_DOWNLOAD_URL = "https://calibre-ebook.com/download"
+
+
+class CalibrePathRequest(BaseModel):
+    path: str
+
+
+@app.get("/api/book/calibre-status")
+def calibre_status(user: User = Depends(require_user)):
+    """Report whether a Calibre engine is reachable on this machine for the
+    current user, plus the saved custom path and cloud-API fallback state."""
+    import book_converter_worker as _bcw
+
+    custom = _get_user_setting(user.id, "calibre_path") or ""
+    resolved = _bcw._find_ebook_convert(custom or None)
+    cloud_available = bool(_bcw.CLOUDCONVERT_API_KEY or _bcw.ZAMZAR_API_KEY)
+    return {
+        "installed": bool(resolved),
+        "path": resolved or "",
+        "custom_path": custom,
+        "cloud_available": cloud_available,
+        "download_url": CALIBRE_DOWNLOAD_URL,
+    }
+
+
+@app.put("/api/book/calibre-path")
+def set_calibre_path(req: CalibrePathRequest, user: User = Depends(require_user)):
+    """Persist a custom Calibre location (the ebook-convert executable or its
+    install directory) and report whether it resolves."""
+    import book_converter_worker as _bcw
+
+    path = req.path.strip().strip('"')
+    if not path:
+        _delete_user_setting(user.id, "calibre_path")
+        resolved = _bcw._find_ebook_convert(None)
+        return {"ok": True, "custom_path": "", "installed": bool(resolved), "path": resolved or ""}
+
+    resolved = _bcw._resolve_calibre_candidate(path)
+    if not resolved:
+        raise HTTPException(
+            status_code=400,
+            detail="该路径下未找到 ebook-convert，请填写 Calibre 安装目录或 ebook-convert 可执行文件的完整路径。",
+        )
+    _set_user_setting(user.id, "calibre_path", path)
+    return {"ok": True, "custom_path": path, "installed": True, "path": resolved}
+
+
+@app.delete("/api/book/calibre-path")
+def clear_calibre_path(user: User = Depends(require_user)):
+    """Clear the saved custom Calibre path and fall back to auto-detection."""
+    import book_converter_worker as _bcw
+
+    _delete_user_setting(user.id, "calibre_path")
+    resolved = _bcw._find_ebook_convert(None)
+    return {"ok": True, "custom_path": "", "installed": bool(resolved), "path": resolved or ""}
 
 
 # ---------------------------------------------------------------------------
@@ -2532,6 +2642,39 @@ def select_edge_profile(req: EdgeProfileSelectRequest, user: User = Depends(requ
 
 
 # ---------------------------------------------------------------------------
+# Firefox profile selection (used by Web→PDF X/Twitter mode)
+# ---------------------------------------------------------------------------
+class FirefoxProfileSelectRequest(BaseModel):
+    dir: str
+
+
+@app.get("/api/firefox-profiles")
+def get_firefox_profiles(user: User = Depends(require_user)):
+    """List the Firefox profiles on this machine plus the user's saved choice
+    (falling back to auto-detection)."""
+    import browser_utils
+    profiles = browser_utils.list_firefox_profiles()
+    saved = _get_user_setting(user.id, "firefox_profile")
+    valid_dirs = {p["dir"] for p in profiles}
+    if saved in valid_dirs:
+        selected = saved
+    else:
+        resolved = browser_utils.resolve_firefox_profile()
+        selected = os.path.basename(resolved.rstrip("\\/")) if resolved else ""
+    return {"profiles": profiles, "selected": selected}
+
+
+@app.post("/api/firefox-profiles/select")
+def select_firefox_profile(req: FirefoxProfileSelectRequest, user: User = Depends(require_user)):
+    """Persist the user's chosen Firefox profile directory."""
+    choice = req.dir.strip()
+    if not choice:
+        raise HTTPException(status_code=400, detail="Profile dir is required")
+    _set_user_setting(user.id, "firefox_profile", choice)
+    return {"ok": True, "selected": choice}
+
+
+# ---------------------------------------------------------------------------
 # Discord Chat Export
 # ---------------------------------------------------------------------------
 _DISCORD_CACHE_DIR = os.path.join(tempfile.gettempdir(), "vt_discord_cache")
@@ -2607,6 +2750,70 @@ def save_discord_token(req: DiscordTokenRequest, user: User = Depends(require_us
 def clear_discord_token(user: User = Depends(require_user)):
     _delete_user_setting(user.id, "discord_token")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Video transcription cookies (per-user YouTube/Bilibili login)
+# ---------------------------------------------------------------------------
+class YtCookiesRequest(BaseModel):
+    text: str | None = None      # Netscape cookies.txt content
+    browser: str | None = None   # e.g. "chrome" or "edge:Default"
+
+
+def _yt_cookies_status(user_id: str) -> dict:
+    """Non-sensitive status for the cookies UI (never returns raw cookies)."""
+    text = _decrypt_secret(_get_user_setting(user_id, "yt_cookies"))
+    browser = _get_user_setting(user_id, "yt_cookies_browser") or ""
+    has_global = os.path.isfile(_COOKIES_FILE) or bool(_COOKIES_BROWSER)
+    summary = _summarize_cookies(text) if text else {"cookie_count": 0, "domains": []}
+    return {
+        "has_cookies": bool(text),
+        "browser": browser,
+        "cookie_count": summary["cookie_count"],
+        "domains": summary["domains"],
+        "supported_browsers": list(_SUPPORTED_COOKIE_BROWSERS),
+        "global_fallback": has_global,
+    }
+
+
+@app.get("/api/transcribe/cookies")
+def get_yt_cookies(user: User = Depends(require_user)):
+    return _yt_cookies_status(user.id)
+
+
+@app.put("/api/transcribe/cookies")
+def set_yt_cookies(req: YtCookiesRequest, user: User = Depends(require_user)):
+    text = (req.text or "").strip()
+    browser = (req.browser or "").strip()
+
+    if text:
+        if _jar_from_text(text) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="无法识别为 Netscape 格式的 cookies.txt，请确认从浏览器扩展正确导出。",
+            )
+        _set_user_setting(user.id, "yt_cookies", _encrypt_secret(text))
+        _delete_user_setting(user.id, "yt_cookies_browser")
+    elif browser:
+        name = browser.partition(":")[0].lower()
+        if name not in _SUPPORTED_COOKIE_BROWSERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的浏览器：{name}。可选：{', '.join(_SUPPORTED_COOKIE_BROWSERS)}",
+            )
+        _set_user_setting(user.id, "yt_cookies_browser", browser)
+        _delete_user_setting(user.id, "yt_cookies")
+    else:
+        raise HTTPException(status_code=400, detail="请提供 cookies 文本或选择浏览器。")
+
+    return {"ok": True, **_yt_cookies_status(user.id)}
+
+
+@app.delete("/api/transcribe/cookies")
+def clear_yt_cookies(user: User = Depends(require_user)):
+    _delete_user_setting(user.id, "yt_cookies")
+    _delete_user_setting(user.id, "yt_cookies_browser")
+    return {"ok": True, **_yt_cookies_status(user.id)}
 
 
 @app.post("/api/discord/stream")

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import useSSEStream from './useSSEStream'
+import FirefoxProfilePicker from './FirefoxProfilePicker'
 
 function WebToPdf({ token, onAuthError }) {
   const [url, setUrl] = useState('')
@@ -42,11 +43,11 @@ function WebToPdf({ token, onAuthError }) {
 
   return (
     <>
-      <h2 className="tool-page-title">🌐 Web Page to PDF</h2>
+      <h2 className="tool-page-title">🌐 Web → PDF（智能提取正文）</h2>
 
       <div className="input-section">
         <p className="tool-description">
-          Enter any webpage URL to render it as a PDF file.
+          输入任意网页 URL，自动智能提取正文与图片（去除广告、导航等杂乱内容），生成干净易读的 PDF。
         </p>
         <div className="url-row">
           <input
@@ -70,6 +71,7 @@ function WebToPdf({ token, onAuthError }) {
           />
           X / Twitter article (uses Firefox login session)
         </label>
+        {isX && <FirefoxProfilePicker token={token} onAuthError={onAuthError} />}
       </div>
 
       {progressLog.length > 0 && (

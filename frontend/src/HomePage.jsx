@@ -14,18 +14,10 @@ function HomePage({ onSelectTool }) {
     {
       id: 'webtopdf',
       icon: '🌐',
-      title: 'Web Page to PDF',
+      title: 'Web → PDF（智能提取正文）',
       description:
-        'Enter any webpage URL and download a fully-rendered PDF to your device in seconds.',
-      tags: ['PDF', 'Web', 'Download'],
-    },
-    {
-      id: 'webtopdf2',
-      icon: '📰',
-      title: 'Article to PDF',
-      description:
-        'Extracts only the article text and images — removes ads, nav bars, and clutter — and saves as a clean readable PDF.',
-      tags: ['PDF', 'Article', 'Readability'],
+        '输入任意网页 URL，自动智能提取正文与图片（去除广告、导航和杂乱内容），生成干净易读的 PDF。支持登录态抓取 X / Twitter 文章。',
+      tags: ['PDF', 'Web', 'Readability', 'X/Twitter'],
     },
     {
       id: 'dsvpdf',

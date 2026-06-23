@@ -191,3 +191,145 @@ def copy_profile_to_temp(profile: str | None = None, domain_hint: str = "") -> t
             pass
 
     return tmp_dir, "Default"
+
+
+# ---------------------------------------------------------------------------
+# Firefox profile utilities (used by the Web→PDF X/Twitter mode)
+#
+# Firefox stores its profile list in profiles.ini (not a JSON Local State like
+# Edge), and does not record account emails. We instead surface each profile's
+# name and whether its cookies.sqlite already holds an x.com / twitter.com login
+# so the user can tell which profile is signed into X.
+# ---------------------------------------------------------------------------
+def get_firefox_profiles_root() -> str:
+    """Return the Firefox 'Profiles' directory for the current Windows user.
+
+    Honours the ``VT_FIREFOX_PROFILES`` override, otherwise derives it from
+    %APPDATA% so it works regardless of the logged-in user name.
+    """
+    override = os.environ.get("VT_FIREFOX_PROFILES")
+    if override:
+        return override
+    appdata = os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")
+    return os.path.join(appdata, "Mozilla", "Firefox", "Profiles")
+
+
+def _firefox_profile_has_x_login(profile_path: str) -> bool:
+    """True if the profile's cookies.sqlite holds an x.com/twitter.com cookie.
+
+    Copies the DB **plus its -wal/-shm sidecars** first, because a running
+    Firefox keeps recent logins in the write-ahead log that hasn't been merged
+    into the main file yet — without them a fresh login looks absent. Matching is
+    done on the ``host`` column (Firefox dropped the older ``baseDomain`` column),
+    using suffix matches so unrelated hosts like ``twittervideodownloader.com``
+    don't count. Any failure is treated as "unknown" (False) and never raises.
+    """
+    import sqlite3
+
+    db = os.path.join(profile_path, "cookies.sqlite")
+    if not os.path.isfile(db):
+        return False
+    tmpdir = tempfile.mkdtemp(prefix="vt_ff_xcheck_")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            src = db + suffix
+            if os.path.isfile(src):
+                try:
+                    shutil.copy2(src, os.path.join(tmpdir, "cookies.sqlite" + suffix))
+                except OSError:
+                    pass
+        conn = sqlite3.connect(os.path.join(tmpdir, "cookies.sqlite"))
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM moz_cookies WHERE "
+                "host = 'x.com' OR host LIKE '%.x.com' "
+                "OR host = 'twitter.com' OR host LIKE '%.twitter.com' LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def list_firefox_profiles() -> list[dict]:
+    """Enumerate Firefox profiles from profiles.ini.
+
+    Returns ``[{"dir", "name", "has_x"}]`` where ``dir`` is the profile folder
+    name under the Profiles root. Profiles already signed into X are listed
+    first, then default-release, then the rest.
+    """
+    import configparser
+
+    root = get_firefox_profiles_root()
+    ini = os.path.join(os.path.dirname(root), "profiles.ini")
+    profiles: list[dict] = []
+    seen: set[str] = set()
+
+    cfg = configparser.ConfigParser()
+    try:
+        cfg.read(ini, encoding="utf-8")
+        for sec in cfg.sections():
+            if not sec.startswith("Profile"):
+                continue
+            path = cfg.get(sec, "Path", fallback="").replace("/", os.sep)
+            if not path:
+                continue
+            is_rel = cfg.get(sec, "IsRelative", fallback="1") == "1"
+            full = os.path.join(os.path.dirname(root), path) if is_rel else path
+            folder = os.path.basename(full.rstrip("\\/"))
+            if not os.path.isdir(full) or folder in seen:
+                continue
+            seen.add(folder)
+            profiles.append({
+                "dir": folder,
+                "name": cfg.get(sec, "Name", fallback=folder),
+                "has_x": _firefox_profile_has_x_login(full),
+            })
+    except (OSError, configparser.Error):
+        pass
+
+    # Fallback: scan the Profiles directory if profiles.ini is missing/unreadable.
+    if not profiles and os.path.isdir(root):
+        try:
+            for entry in os.scandir(root):
+                if entry.is_dir() and entry.name not in seen:
+                    profiles.append({
+                        "dir": entry.name,
+                        "name": entry.name,
+                        "has_x": _firefox_profile_has_x_login(entry.path),
+                    })
+        except OSError:
+            pass
+
+    profiles.sort(key=lambda p: (
+        not p["has_x"],
+        "default-release" not in p["dir"],
+        p["dir"],
+    ))
+    return profiles
+
+
+def resolve_firefox_profile(profile: str | None = None) -> str:
+    """Resolve which Firefox profile to use; returns its absolute path ("" if none).
+
+    Order: explicit arg -> VT_FIREFOX_PROFILE env -> a profile signed into X ->
+    a "default-release" profile -> the first available profile.
+    """
+    root = get_firefox_profiles_root()
+    chosen = (profile or os.environ.get("VT_FIREFOX_PROFILE") or "").strip()
+    if chosen:
+        cand = chosen if os.path.isabs(chosen) else os.path.join(root, chosen)
+        if os.path.isdir(cand):
+            return cand
+
+    profiles = list_firefox_profiles()
+    for p in profiles:
+        if p["has_x"]:
+            return os.path.join(root, p["dir"])
+    for p in profiles:
+        if "default-release" in p["dir"]:
+            return os.path.join(root, p["dir"])
+    return os.path.join(root, profiles[0]["dir"]) if profiles else ""
