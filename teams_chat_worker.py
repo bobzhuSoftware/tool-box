@@ -30,7 +30,11 @@ from datetime import datetime
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 # Reuse the authenticated-Edge-profile machinery (works on any machine with Edge).
-from browser_utils import copy_profile_to_temp as _copy_profile_to_temp  # noqa: E402
+# Modern Edge holds its live cookie DB under an exclusive lock, so the old
+# "copy the running profile" trick no longer works. We share the dedicated,
+# persistent Edge automation profile with teams_transcript_worker — the user
+# signs in once and the session is reused across both features.
+from browser_utils import ensure_automation_profile, automation_profile_signed_in  # noqa: E402
 
 TEAMS_URL = "https://teams.microsoft.com/v2/"
 
@@ -51,50 +55,90 @@ def done(data: dict) -> None:
 # Browser helpers
 # ---------------------------------------------------------------------------
 async def _open_teams(p):
-    """Launch a persistent Edge context against a temp copy of the signed-in
-    profile and open the Teams web app. Returns (ctx, page, tmp_user_data_dir)."""
-    status("① 正在复制 Edge 登录信息…")
-    tmp_user_data, tmp_profile = _copy_profile_to_temp()
-    status("② 正在启动浏览器…")
-    ctx = await p.chromium.launch_persistent_context(
-        user_data_dir=tmp_user_data,
-        channel="msedge",
-        headless=True,
-        args=["--no-first-run", f"--profile-directory={tmp_profile}"],
-    )
-    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-    status("③ 正在打开 Teams 网页版…")
+    """Launch the dedicated Edge automation profile (shared with the transcript
+    worker, signed into once) and open the Teams web app.
+
+    Returns (ctx, page, ok). ``ok`` is True when the Teams app shell loaded, i.e.
+    the user is signed in. Tries headless first (silent SSO) and only opens a
+    visible window when an interactive sign-in is actually required."""
+    automation_dir = ensure_automation_profile()
+
+    async def _launch(headless: bool):
+        # Edge's legacy --headless crashes persistent contexts, so request the
+        # modern headless engine via an arg and keep Playwright's flag off.
+        args = ["--no-first-run", "--no-default-browser-check"]
+        if headless:
+            args.append("--headless=new")
+        c = await p.chromium.launch_persistent_context(
+            user_data_dir=automation_dir,
+            channel="msedge",
+            headless=False,
+            args=args,
+        )
+        pg = c.pages[0] if c.pages else await c.new_page()
+        try:
+            await pg.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        return c, pg
+
+    async def _interactive_login_visible(pg) -> bool:
+        for sel in ('input[type="password"]', 'input[name="loginfmt"]',
+                    'input[name="passwd"]', '#i0116', '#i0118'):
+            try:
+                if await pg.locator(sel).first.is_visible(timeout=400):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_ready(pg, secs: int) -> str:
+        """Poll until the Teams app shell is ready. Returns 'ok'|'needlogin'|'timeout'.
+
+        A transient login.* redirect is part of silent SSO, so it only counts as
+        needlogin when a real sign-in field is actually visible."""
+        for _ in range(secs):
+            current = (pg.url or "").lower()
+            if ("login.microsoftonline" in current or "login.live" in current
+                    or "login.windows" in current):
+                if await _interactive_login_visible(pg):
+                    return "needlogin"
+                await asyncio.sleep(1)
+                continue
+            try:
+                shell = await pg.evaluate(
+                    """() => !!document.querySelector(
+                        '[data-tid="me-control-avatar"], [data-tid="app-bar-wrapper"]'
+                    )"""
+                )
+            except Exception:
+                shell = False
+            if shell:
+                return "ok"
+            await asyncio.sleep(1)
+        return "timeout"
+
+    status("① 正在启动浏览器…")
+    ctx, page = await _launch(headless=True)
+    status("② 正在打开 Teams 网页版…")
+    status("③ 等待 Teams 加载（约需 10–20 秒）…")
+    state = await _wait_ready(page, 40)
+    if state == "ok":
+        return ctx, page, True
+
+    # First time, expired, or silent SSO didn't complete → open a visible window
+    # so the user can sign in once (then it's remembered for both workers).
     try:
-        await page.goto(TEAMS_URL, wait_until="domcontentloaded", timeout=45000)
+        await ctx.close()
     except Exception:
         pass
-
-    # Teams v2 shows a splash screen for ~10s, then hydrates the app shell.
-    # Poll until either the app shell is ready (the "me" avatar appears) or we get
-    # bounced to a login page. A fixed short sleep is not enough — it hangs on the
-    # splash and we'd scrape nothing.
-    status("④ 等待 Teams 加载（约需 10–20 秒）…")
-    ready = False
-    for _ in range(40):  # up to ~40s
-        await asyncio.sleep(1)
-        current = page.url.lower()
-        if "login" in current or "microsoftonline" in current:
-            return ctx, page, tmp_user_data, False
-        try:
-            ok = await page.evaluate(
-                """() => !!document.querySelector(
-                    '[data-tid="me-control-avatar"], [data-tid="app-bar-wrapper"]'
-                )"""
-            )
-        except Exception:
-            ok = False
-        if ok:
-            ready = True
-            break
-    if not ready:
-        # Last chance: maybe it still works; let the caller try.
-        await asyncio.sleep(2)
-    return ctx, page, tmp_user_data, True
+    status("需要登录：正在打开 Edge 窗口，请在该窗口登录 Teams（之后会自动记住）…")
+    ctx, page = await _launch(headless=False)
+    state = await _wait_ready(page, 180)
+    if state == "ok":
+        status("登录成功，继续…")
+        return ctx, page, True
+    return ctx, page, False
 
 
 async def _goto_chat_list(page) -> None:
@@ -157,10 +201,10 @@ async def list_chats() -> None:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        ctx, page, tmp, ok = await _open_teams(p)
+        ctx, page, ok = await _open_teams(p)
         try:
             if not ok:
-                error("Authentication required — your Edge Teams session may have expired. Open Teams in Edge, sign in, then retry.")
+                error("Authentication required — 未能登录 Teams。请重试并在弹出的 Edge 窗口中完成登录。")
                 return
 
             status("⑤ 正在打开聊天列表…")
@@ -237,8 +281,6 @@ async def list_chats() -> None:
             done({"chats": chats})
         finally:
             await ctx.close()
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -718,10 +760,10 @@ async def export_chat(chat_id: str, chat_name: str, output_path: str,
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        ctx, page, tmp, ok = await _open_teams(p)
+        ctx, page, ok = await _open_teams(p)
         try:
             if not ok:
-                error("Authentication required — your Edge Teams session may have expired.")
+                error("Authentication required — 未能登录 Teams。请重试并在弹出的 Edge 窗口中完成登录。")
                 return
 
             status(f"Opening chat: {chat_name}…")
@@ -747,8 +789,6 @@ async def export_chat(chat_id: str, chat_name: str, output_path: str,
             done({"count": len(messages), "name": chat_name})
         finally:
             await ctx.close()
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

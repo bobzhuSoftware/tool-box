@@ -75,6 +75,22 @@ function HomePage({ onSelectTool }) {
         '粘贴一个 Threads 帖子链接，把视频下载到本地。支持单个或多视频轮播，仅适用于公开帖子。',
       tags: ['Threads', 'Video', 'Download'],
     },
+    {
+      id: 'audio',
+      icon: '🎙️',
+      title: '全声道录音',
+      description:
+        '录制电脑扬声器输出的全部声音（含 Teams/会议、视频、音乐等），可同时混入麦克风，结束后导出为 WAV / MP3。仅本机可用。',
+      tags: ['录音', '系统音频', '会议'],
+    },
+    {
+      id: 'screen',
+      icon: '🎬',
+      title: '窗口录屏',
+      description:
+        '录制单个窗口的画面，并同时录入电脑全部声音（含 Teams/会议、视频等），可混入麦克风，导出为带声音的 MP4。仅本机可用。',
+      tags: ['录屏', '窗口', '会议', 'MP4'],
+    },
   ]
 
   const q = query.trim().toLowerCase()

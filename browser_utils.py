@@ -18,6 +18,69 @@ import shutil
 import tempfile
 
 
+def _robust_copy(src: str, dst: str) -> bool:
+    """Copy ``src`` to ``dst``, even when the source is locked by a running
+    browser (e.g. Edge keeps its ``Cookies`` SQLite file open *for writing*).
+
+    A plain ``shutil.copy2`` opens the source denying write-sharing, so it fails
+    with "being used by another process" while Edge is open — which silently
+    leaves the temp profile with no cookies and forces a re-login. On Windows we
+    retry by opening the file with ``FILE_SHARE_READ|WRITE|DELETE`` via
+    ``CreateFileW`` so the read can coexist with Edge's open handle.
+
+    Returns ``True`` on success, ``False`` if the file could not be copied.
+    """
+    try:
+        shutil.copy2(src, dst)
+        return True
+    except OSError:
+        pass
+
+    if os.name != "nt":
+        return False
+
+    import ctypes
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    FILE_SHARE_READ = 0x1
+    FILE_SHARE_WRITE = 0x2
+    FILE_SHARE_DELETE = 0x4
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    CreateFileW = ctypes.windll.kernel32.CreateFileW
+    CreateFileW.restype = wintypes.HANDLE
+    CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+
+    handle = CreateFileW(
+        src, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        return False
+
+    try:
+        import msvcrt
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        # fd now owns the handle; closing the stream closes it.
+        with os.fdopen(fd, "rb", closefd=True) as fsrc, open(dst, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst)
+        return True
+    except OSError:
+        try:
+            ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+        return False
+
+
+
 def get_edge_user_data_dir() -> str:
     """Return the Edge 'User Data' directory for the current Windows user.
 
@@ -29,6 +92,28 @@ def get_edge_user_data_dir() -> str:
         return override
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
     return os.path.join(base, "Microsoft", "Edge", "User Data")
+
+
+def get_automation_user_data_dir() -> str:
+    """Return a dedicated, persistent Edge 'user data' dir for automation.
+
+    Modern Edge holds its ``Cookies`` SQLite file with an *exclusive* lock while
+    running, so copying a live profile's cookies (the old approach) no longer
+    works. Instead we drive a separate, persistent Edge profile that the user
+    signs into once; the session is then reused on every subsequent run while
+    their normal Edge stays open and untouched.
+
+    Honours the ``VT_EDGE_AUTOMATION_DIR`` override.
+    """
+    override = os.environ.get("VT_EDGE_AUTOMATION_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
+    path = os.path.join(base, "VideoTranscript", "edge-automation")
+    os.makedirs(path, exist_ok=True)
+    return path
+
 
 
 def list_edge_profiles() -> list[dict]:
@@ -148,10 +233,7 @@ def copy_profile_to_temp(profile: str | None = None, domain_hint: str = "") -> t
                   "Secure Preferences", "Local State"):
         src = os.path.join(src_profile, fname)
         if os.path.isfile(src):
-            try:
-                shutil.copy2(src, os.path.join(dst_profile, fname))
-            except OSError:
-                pass  # file locked — skip, auth still works via remaining cookies
+            _robust_copy(src, os.path.join(dst_profile, fname))
 
     # Newer Edge versions (post-2023) store Cookies under a Network/ subdirectory.
     network_src = os.path.join(src_profile, "Network")
@@ -161,10 +243,7 @@ def copy_profile_to_temp(profile: str | None = None, domain_hint: str = "") -> t
         for fname in os.listdir(network_src):
             src = os.path.join(network_src, fname)
             if os.path.isfile(src):
-                try:
-                    shutil.copy2(src, os.path.join(network_dst, fname))
-                except OSError:
-                    pass
+                _robust_copy(src, os.path.join(network_dst, fname))
 
     # Modern SPAs (e.g. Teams v2) keep their MSAL auth tokens in Local Storage /
     # IndexedDB, NOT in cookies. Without these the app authenticates but then
@@ -185,12 +264,59 @@ def copy_profile_to_temp(profile: str | None = None, domain_hint: str = "") -> t
     # needed to decrypt cookies.
     local_state_src = os.path.join(user_data, "Local State")
     if os.path.isfile(local_state_src):
-        try:
-            shutil.copy2(local_state_src, os.path.join(tmp_dir, "Local State"))
-        except OSError:
-            pass
+        _robust_copy(local_state_src, os.path.join(tmp_dir, "Local State"))
 
     return tmp_dir, "Default"
+
+
+def automation_profile_signed_in() -> bool:
+    """True if the dedicated automation profile already has a cookie DB (i.e. the
+    user has signed in there at least once)."""
+    auto = get_automation_user_data_dir()
+    for rel in (("Default", "Network", "Cookies"), ("Default", "Cookies")):
+        path = os.path.join(auto, *rel)
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def ensure_automation_profile(profile: str | None = None, domain_hint: str = "") -> str:
+    """Prepare the persistent Edge automation profile and return its user-data dir.
+
+    A *bare* Edge profile triggers the first-run/welcome experience (which loads
+    portal.office.com in a helper web-contents and crashes Playwright with
+    "Browser window not found"). To avoid that we seed the automation profile
+    once with the user's real-profile **config** files — ``Preferences``,
+    ``Secure Preferences`` and the root ``Local State`` — which mark first-run as
+    done and carry the cookie-encryption key. The exclusively-locked ``Cookies``
+    DB is deliberately *not* copied: the user signs in once in a visible window
+    and the session is then persisted here for reuse.
+
+    Seeding is skipped entirely once the profile has its own cookies.
+    """
+    auto = get_automation_user_data_dir()
+    if automation_profile_signed_in():
+        return auto
+
+    user_data = get_edge_user_data_dir()
+    src_profile = os.path.join(user_data, resolve_profile(profile, domain_hint))
+    dst_profile = os.path.join(auto, "Default")
+    os.makedirs(dst_profile, exist_ok=True)
+
+    for fname in ("Preferences", "Secure Preferences", "Network Persistent State"):
+        src = os.path.join(src_profile, fname)
+        if os.path.isfile(src):
+            _robust_copy(src, os.path.join(dst_profile, fname))
+
+    local_state_src = os.path.join(user_data, "Local State")
+    if os.path.isfile(local_state_src):
+        _robust_copy(local_state_src, os.path.join(auto, "Local State"))
+
+    return auto
+
 
 
 # ---------------------------------------------------------------------------

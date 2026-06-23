@@ -13,7 +13,6 @@ import asyncio
 import io
 import json
 import re
-import shutil
 import sys
 from urllib.parse import urlparse, quote, unquote
 
@@ -21,8 +20,13 @@ from urllib.parse import urlparse, quote, unquote
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 # Profile/auth handling lives in browser_utils so it works on any machine that
-# has Edge installed (no hard-coded user name or profile).
-from browser_utils import copy_profile_to_temp as _copy_profile_to_temp  # noqa: E402
+# has Edge installed. Modern Edge exclusively locks its live cookie DB, so we
+# drive a dedicated persistent automation profile instead of copying the user's
+# running session.
+from browser_utils import (  # noqa: E402
+    ensure_automation_profile,
+    automation_profile_signed_in,
+)
 
 # ---- UUID cue-identifier pattern ----------------------------------------
 # Matches lines like: aca214ba-5200-4ec1-8bbe-66c314ec0a0e/119-0
@@ -154,17 +158,23 @@ async def run(url: str, output_path: str):
 
     # Copy profile to temp dir so Edge can stay open
     status("Preparing browser session…")
-    tmp_user_data, tmp_profile = _copy_profile_to_temp()
+
+    # Modern Edge holds its live cookie DB under an *exclusive* lock, so the old
+    # "copy the running profile" trick no longer works. Instead we use a
+    # dedicated, persistent Edge automation profile that the user signs into
+    # once; the session is reused on every subsequent run while their normal
+    # Edge stays open. We try headless first (Windows SSO often signs in
+    # silently) and only open a visible window when interactive login is needed.
+    automation_dir = ensure_automation_profile()
+
+    def _on_login_host(u: str) -> bool:
+        u = (u or "").lower()
+        return ("login.microsoftonline.com" in u or "login.live.com" in u
+                or "login.windows.net" in u or "msauth" in u
+                or "/_forms/default.aspx" in u)
 
     try:
         async with async_playwright() as p:
-            ctx = await p.chromium.launch_persistent_context(
-                user_data_dir=tmp_user_data,
-                channel="msedge",
-                headless=True,
-                args=["--no-first-run", f"--profile-directory={tmp_profile}"],
-            )
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
             async def on_response(response):
                 rurl = response.url
@@ -205,24 +215,157 @@ async def run(url: str, output_path: str):
                     except Exception:
                         pass
 
-            ctx.on("response", on_response)
+            async def _interactive_login_visible(pg) -> bool:
+                # A genuinely required sign-in shows a username/password field.
+                for sel in ('input[type="password"]', 'input[name="loginfmt"]',
+                            'input[name="passwd"]', '#i0116', '#i0118'):
+                    try:
+                        if await pg.locator(sel).first.is_visible(timeout=500):
+                            return True
+                    except Exception:
+                        continue
+                return False
+
+            async def _no_access_in_page(pg) -> bool:
+                # SharePoint renders an in-page "You don't have access" notice on
+                # the SAME stream.aspx URL when the signed-in account lacks
+                # permission (e.g. the wrong Edge profile/tenant was chosen). The
+                # URL never changes to an accessdenied page, so we must look at the
+                # rendered text to catch it instead of silently failing later with
+                # a misleading "no transcript found".
+                try:
+                    txt = await pg.evaluate(
+                        "() => (document.body ? document.body.innerText : '').slice(0, 4000)"
+                    )
+                except Exception:
+                    return False
+                low = (txt or "").lower()
+                phrases = (
+                    "you don't have access", "you do not have access",
+                    "request access", "don't have permission",
+                    "do not have permission", "需要访问权限", "没有访问权限",
+                    "无权访问", "请求访问权限",
+                )
+                return any(p in low for p in phrases)
+
+            async def _wait_silent(pg, secs: int) -> str:
+                """Headless settle check. Returns 'ok' | 'accessdenied' | 'needlogin'.
+
+                SharePoint Stream does a silent SSO bounce, so a transient login
+                redirect is not a failure — only an actual interactive prompt (or
+                never leaving the login host) means we must sign in.
+                """
+                for _ in range(secs):
+                    u = pg.url
+                    if "accessdenied" in u.lower():
+                        return "accessdenied"
+                    if transcript_meta:
+                        return "ok"
+                    if _on_login_host(u):
+                        if await _interactive_login_visible(pg):
+                            return "needlogin"
+                        await asyncio.sleep(1)
+                        continue
+                    if "sharepoint.com" in u.lower() or "stream.aspx" in u.lower():
+                        return "ok"
+                    await asyncio.sleep(1)
+                return "needlogin" if _on_login_host(pg.url) else "ok"
+
+            async def _wait_login(pg, secs: int) -> str:
+                """Wait (headed) for the user to finish signing in.
+
+                Returns 'ok' | 'accessdenied' | 'timeout'. A login host is treated
+                as "still working" so the user has time to authenticate.
+                """
+                for _ in range(secs):
+                    u = pg.url
+                    if "accessdenied" in u.lower():
+                        return "accessdenied"
+                    if transcript_meta:
+                        return "ok"
+                    if not _on_login_host(u) and ("sharepoint.com" in u.lower() or "stream.aspx" in u.lower()):
+                        return "ok"
+                    await asyncio.sleep(1)
+                return "timeout"
+
+            async def _launch(headless: bool):
+                # Edge's legacy --headless mode crashes persistent contexts
+                # ("Browser window not found"), so request the modern headless
+                # engine via an arg and keep Playwright's own flag off.
+                args = ["--no-first-run", "--no-default-browser-check"]
+                if headless:
+                    args.append("--headless=new")
+                c = await p.chromium.launch_persistent_context(
+                    user_data_dir=automation_dir,
+                    channel="msedge",
+                    headless=False,
+                    args=args,
+                )
+                pg = c.pages[0] if c.pages else await c.new_page()
+                c.on("response", on_response)
+                try:
+                    await pg.goto(stream_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                return c, pg
+
+            async def _try_launch(headless: bool):
+                try:
+                    return await _launch(headless=headless)
+                except Exception as e:
+                    status(f"Edge launch issue ({'headless' if headless else 'window'}): {str(e)[:80]}")
+                    return None, None
 
             status("Loading recording page…")
+            ctx = None
+            page = None
+            state = "needlogin"
+
+            # If we've signed in before, try silently (headless) first.
+            if automation_profile_signed_in():
+                ctx, page = await _try_launch(headless=True)
+                if ctx is not None:
+                    status("Verifying sign-in…")
+                    state = await _wait_silent(page, 25)
+                    if state not in ("ok", "accessdenied"):
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+                        ctx = page = None
+
+            # First time, expired, or headless failed → open a visible window so
+            # the user can complete sign-in once (then it's remembered).
+            if state not in ("ok", "accessdenied"):
+                status("需要登录：正在打开 Edge 窗口，请在该窗口完成登录（之后会自动记住）…")
+                ctx, page = await _try_launch(headless=False)
+                if ctx is None:
+                    print("ERROR:Could not open Edge for sign-in. Please retry.", flush=True)
+                    return
+                state = await _wait_login(page, 180)
+                if state == "ok":
+                    status("登录成功，继续获取字幕…")
+
+            if state == "accessdenied":
+                print("ERROR:Access denied — you may not have permission to view this recording.", flush=True)
+                await ctx.close()
+                return
+            if state != "ok":
+                print("ERROR:Authentication required — sign-in was not completed in the Edge window. Please retry and finish signing in.", flush=True)
+                await ctx.close()
+                return
+
+            # The page that loaded during the auth bounce is often in a
+            # half-rendered state: in the headless silent path the first goto
+            # happens BEFORE sign-in completes, so the SharePoint Stream player
+            # never hydrates (and its transcript API never fires) even though the
+            # URL ends up back on stream.aspx. Always re-open the recording URL on
+            # the now-authenticated session so the player loads cleanly.
+            status("Reloading recording page…")
             try:
                 await page.goto(stream_url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
                 pass
-
-            await asyncio.sleep(3)
-            actual_url = page.url
-            if "login" in actual_url.lower() or "microsoftonline" in actual_url.lower():
-                print("ERROR:Authentication required — Edge session may have expired.", flush=True)
-                await ctx.close()
-                return
-            if "accessdenied" in actual_url.lower():
-                print("ERROR:Access denied — you may not have permission to view this recording.", flush=True)
-                await ctx.close()
-                return
 
             # Try to trigger transcript loading by clicking transcript/CC buttons
             status("Looking for transcript panel…")
@@ -231,6 +374,17 @@ async def run(url: str, output_path: str):
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
+
+            # The recording page can load successfully (URL stays on stream.aspx)
+            # yet show an in-page "You don't have access" notice when the signed-in
+            # account lacks permission. Detect that now and fail with a clear,
+            # actionable message instead of the misleading "no transcript found".
+            if not transcript_meta and await _no_access_in_page(page):
+                print("ERROR:无权限访问该录制 — 当前 Edge profile 登录的账号没有此录制的访问权限。"
+                      "请在设置中选择能打开该录制的 Edge profile（账号），或向录制所有者申请访问权限。",
+                      flush=True)
+                await ctx.close()
+                return
 
             # Try various selectors that SharePoint Stream uses for transcript buttons
             transcript_selectors = [
@@ -428,8 +582,9 @@ async def run(url: str, output_path: str):
             print(f"DONE:{json.dumps({'name': safe_name, 'lang': lang})}", flush=True)
             await ctx.close()
     finally:
-        # Always remove the temp profile copy
-        shutil.rmtree(tmp_user_data, ignore_errors=True)
+        # The automation profile is persistent (so the sign-in is remembered);
+        # nothing to clean up here.
+        pass
 
 
 if __name__ == "__main__":
