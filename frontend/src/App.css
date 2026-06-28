@@ -148,6 +148,286 @@
   padding: 1.5rem 0;
 }
 
+.category-tabs {
+  display: flex;
+  gap: 0.35rem;
+  border-bottom: 1.5px solid #ececf4;
+}
+
+.category-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.85rem;
+  margin-bottom: -1.5px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #9a9ab0;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.category-tab:hover {
+  color: #646cff;
+}
+
+.category-tab.active {
+  color: #646cff;
+  border-bottom-color: #646cff;
+}
+
+.category-tab-count {
+  background: #eff0ff;
+  color: #646cff;
+  border-radius: 20px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.category-empty {
+  color: #b0b0c0;
+  font-size: 0.85rem;
+  padding: 0.75rem 0;
+}
+
+.field-label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.excel-search-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.excel-search-table th,
+.excel-search-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid #e8e8f0;
+  vertical-align: top;
+}
+
+.excel-search-table th {
+  background: #f6f6fb;
+  font-weight: 600;
+  color: #555;
+}
+
+.excel-search-table tbody tr:hover {
+  background: #f9f9ff;
+}
+
+.excel-tree {
+  border: 1px solid #e8e8f0;
+  border-radius: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+  background: #fff;
+}
+
+.excel-tree-file {
+  border-bottom: 1px solid #f0f0f5;
+}
+
+.excel-tree-file:last-child {
+  border-bottom: none;
+}
+
+.excel-tree-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #f8f8fc;
+}
+
+.excel-tree-toggle {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: #888;
+  font-size: 0.8rem;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.excel-tree-filename {
+  font-weight: 600;
+  font-size: 0.86rem;
+  color: #333;
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.excel-tree-reldir {
+  font-weight: 400;
+  color: #aaa;
+  font-size: 0.78rem;
+}
+
+.excel-tree-count {
+  font-size: 0.76rem;
+  color: #9a9ab0;
+  white-space: nowrap;
+}
+
+.excel-tree-sheets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  padding: 8px 10px 10px 30px;
+}
+
+.excel-tree-sheet {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.83rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.excel-tree-sheet-block {
+  width: 100%;
+}
+
+.excel-tree-sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.excel-col-toggle {
+  border: 1px solid #e0e0ec;
+  background: #f6f6fb;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  color: #646cff;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.excel-col-toggle:disabled {
+  color: #c2c2cf;
+  cursor: not-allowed;
+}
+
+.excel-tree-cols {
+  margin: 6px 0 4px 22px;
+  padding: 8px 10px;
+  border: 1px solid #ececf4;
+  border-radius: 8px;
+  background: #fafaff;
+}
+
+.excel-col-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.excel-col-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 4px 14px;
+}
+
+.excel-col-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #555;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.excel-col-letter {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #646cff;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.excel-col-header {
+  color: #777;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.excel-query-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border: 1px solid #d8d8e4;
+  border-radius: 8px;
+  background: #fff;
+  color: #333;
+}
+
+.excel-query-textarea:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.excel-row-notfound td {
+  color: #c0392b;
+  background: #fff5f5;
+}
+
+.excel-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-align: center;
+  padding: 16px;
+  border: 1.5px dashed #c8c8da;
+  border-radius: 10px;
+  background: #fafaff;
+  color: #666;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.excel-dropzone:hover {
+  border-color: #646cff;
+}
+
+.excel-dropzone.dragover {
+  border-color: #646cff;
+  background: #eef0ff;
+  color: #4a4ad8;
+}
+
+.excel-dropzone-icon {
+  font-size: 1.2rem;
+  color: #646cff;
+}
+
+.excel-dropzone-hint {
+  font-size: 0.76rem;
+  color: #9a9ab0;
+}
+
 .tools-grid {
   display: flex;
   flex-direction: column;

@@ -3,16 +3,7 @@ import './App.css'
 import HomePage from './HomePage'
 import VideoTranscript from './VideoTranscript'
 import WebToPdf from './WebToPdf'
-import DsvPagePdf from './DsvPagePdf'
 import TeamsTranscript from './TeamsTranscript'
-import TeamsChat from './TeamsChat'
-import BookConverter from './BookConverter'
-import WechatExport from './WechatExport'
-import DiscordExport from './DiscordExport'
-import ThreadsDownload from './ThreadsDownload'
-import AudioRecorder from './AudioRecorder'
-import ScreenRecorder from './ScreenRecorder'
-import RecordingIndicator from './RecordingIndicator'
 
 function App() {
   // --- Auth state ---
@@ -128,22 +119,10 @@ function App() {
         </div>
       </div>
 
-      {currentTool !== 'audio' && (
-        <RecordingIndicator token={token} onOpen={setCurrentTool} />
-      )}
-
       {currentTool === null && <HomePage onSelectTool={setCurrentTool} />}
       {currentTool === 'transcript' && <VideoTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'webtopdf' && <WebToPdf token={token} onAuthError={handleLogout} />}
-      {currentTool === 'dsvpdf' && <DsvPagePdf token={token} onAuthError={handleLogout} />}
       {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
-      {currentTool === 'teamschat' && <TeamsChat token={token} onAuthError={handleLogout} />}
-      {currentTool === 'bookconvert' && <BookConverter token={token} onAuthError={handleLogout} />}
-      {currentTool === 'wechat' && <WechatExport token={token} onAuthError={handleLogout} />}
-      {currentTool === 'discord' && <DiscordExport token={token} onAuthError={handleLogout} />}
-      {currentTool === 'threads' && <ThreadsDownload token={token} onAuthError={handleLogout} />}
-      {currentTool === 'audio' && <AudioRecorder token={token} onAuthError={handleLogout} />}
-      {currentTool === 'screen' && <ScreenRecorder token={token} onAuthError={handleLogout} />}
     </div>
   )
 }

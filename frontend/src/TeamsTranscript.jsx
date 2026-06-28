@@ -24,10 +24,7 @@ function TeamsTranscript({ token, onAuthError }) {
         onEvent: (event) => {
           if (event.type === 'done') {
             setResult({ job_id: event.job_id, name: event.name, lang: event.lang })
-            addLog({ type: 'done', message: `✓ Transcript ready: ${event.name}.txt` })
-            // Auto-download
-            const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
-            window.open(`/api/teams-transcript/download/${event.job_id}${authParam}`, '_blank')
+            addLog({ type: 'done', message: `✓ Transcript ready: ${event.name}.txt — click Download below` })
           } else if (event.type === 'error') {
             addLog({ type: 'error', message: event.message })
           } else {
@@ -114,14 +111,14 @@ function TeamsTranscript({ token, onAuthError }) {
       {result && (
         <div className="result-section">
           <div className="result-info">
-            <span className="result-label">Transcript downloaded</span>
+            <span className="result-label">Transcript ready</span>
             <span className="result-meta">
               {result.name}.txt{result.lang ? ` · ${result.lang}` : ''}
             </span>
           </div>
           <div className="download-row">
             <button className="btn-primary" onClick={handleDownload}>
-              Download Again
+              Download
             </button>
             <button
               className="btn-outline"

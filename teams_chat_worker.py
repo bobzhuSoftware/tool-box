@@ -424,12 +424,43 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                     const idm = ((b.id || el.id || '') + '').match(/(\d{12,})/);
                     if (idm) mid = Number(idm[1]);
                     let body = (b.innerText || '').trim();
+                    // Reaction summary — the 👍/❤️ chips attached BELOW a message.
+                    // Verified DOM: container data-tid="diverse-reaction-summary";
+                    // each reaction is a data-tid="diverse-reaction-pill-button"
+                    // holding an emoticon <img alt="👍"> plus a leading count in its
+                    // text (e.g. "3 Like reactions. 3"). We collect these separately
+                    // AND exclude their imgs from the body emoji scan below, or the
+                    // reaction emoji would leak into the message text.
+                    const rxEl = el.querySelector('[data-tid="diverse-reaction-summary"]');
+                    const reactions = [];
+                    if (rxEl) {
+                        rxEl.querySelectorAll('[data-tid="diverse-reaction-pill-button"]').forEach(pill => {
+                            const eimg = pill.querySelector('[data-tid="emoticon-renderer"] img[alt], img[alt]');
+                            const emo = eimg ? (eimg.getAttribute('alt') || '').trim() : '';
+                            if (!emo) return;
+                            const m = (pill.innerText || pill.textContent || '').trim().match(/^(\d+)/);
+                            const cnt = m ? Number(m[1]) : 1;
+                            reactions.push(cnt > 1 ? (emo + '×' + cnt) : emo);
+                        });
+                    }
+                    // File attachments render as data-tid="file-attachment-grid".
+                    // The cards load lazily (filenames aren't reliably in the DOM),
+                    // but the aria-label always carries the count.
+                    let attachCount = 0;
+                    const atEl = el.querySelector('[data-tid="file-attachment-grid"]');
+                    if (atEl) {
+                        const al = atEl.getAttribute('aria-label') || '';
+                        const am = al.match(/(\d+)\s+attachment/i);
+                        attachCount = am ? Number(am[1]) : 1;
+                    }
                     // Classify <img> elements: emoji (emoticon-renderer) → keep as
                     // their alt char; real pasted images/GIFs → collect src so we
                     // can fetch the bytes; avatars/placeholders → ignore.
                     const emojis = [];
                     const imgSrcs = [];
                     el.querySelectorAll('img').forEach(im => {
+                        if (rxEl && rxEl.contains(im)) return;  // belongs to a reaction chip
+                        if (atEl && atEl.contains(im)) return;  // attachment thumbnail
                         const tidEl = im.closest('[data-tid]');
                         const tid = tidEl ? tidEl.getAttribute('data-tid') : '';
                         const alt = (im.getAttribute('alt') || '');
@@ -447,7 +478,7 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                     if (emojis.length) {
                         body = (body + ' ' + emojis.join('')).trim();
                     }
-                    out.push({ author, ts, mid, body, imgSrcs });
+                    out.push({ author, ts, mid, body, imgSrcs, reactions, attachCount });
                 });
                 return out;
             }
@@ -466,11 +497,21 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
             # Dedupe by the stable message id when available (avoids the same
             # message being stored twice — once timed, once untimed — which would
             # otherwise bypass date filtering).
+            reactions = r.get("reactions") or []
+            attach = int(r.get("attachCount") or 0)
             key = f"id:{mid}" if mid else f"{author}|{ts}|{body}"
             if key not in collected:
                 collected[key] = {"author": author, "ts": ts, "body": body,
+                                  "reactions": reactions, "attach": attach,
                                   "imgs": [], "imgmiss": 0, "_o": order}
                 order += 1
+            else:
+                # Reactions/attachments can render late (after the message fully
+                # hydrates), so backfill them on a later pass if we missed them.
+                if reactions and not collected[key].get("reactions"):
+                    collected[key]["reactions"] = reactions
+                if attach and not collected[key].get("attach"):
+                    collected[key]["attach"] = attach
             # Queue any real content images for download (once per message, when
             # they've actually loaded). blob: URLs are only valid while the image
             # is in the DOM, so we must fetch the bytes now, during scraping.
@@ -518,10 +559,26 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                 else:
                     msg["imgmiss"] = msg.get("imgmiss", 0) + 1
 
+    # The message pane renders lazily after the chat opens. Wait until at least
+    # one message is actually present (up to ~25s) before scraping; otherwise the
+    # first grab finds nothing and the stale counter ends the scrape empty.
+    for _ in range(25):
+        n = await page.evaluate(
+            '() => document.querySelectorAll(\'[data-tid="chat-pane-message"]\').length'
+        )
+        if n:
+            break
+        await asyncio.sleep(1)
+
     # Initial grab, then scroll up repeatedly until history stops growing.
+    # Teams virtualizes the list, so scrollHeight can stay constant even while
+    # older messages keep loading. Track the message COUNT and the earliest
+    # loaded timestamp as the real progress signals, not height alone.
     await grab()
     stale = 0
-    for i in range(200):
+    prev_count = len(collected)
+    prev_earliest = min((m["ts"] for m in collected.values() if m["ts"]), default="")
+    for i in range(300):
         height_before = await page.evaluate(
             """
             () => {
@@ -542,7 +599,7 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
             }
             """
         )
-        await asyncio.sleep(1.1)
+        await asyncio.sleep(1.3)
         await grab()
         height_after = await page.evaluate(
             """
@@ -562,12 +619,21 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
             }
             """
         )
-        if height_after <= height_before:
-            stale += 1
-            if stale >= 4:
-                break
-        else:
+        cur_count = len(collected)
+        cur_earliest = min((m["ts"] for m in collected.values() if m["ts"]), default="")
+        progressed = (
+            cur_count > prev_count
+            or (cur_earliest and (not prev_earliest or cur_earliest < prev_earliest))
+            or height_after > height_before
+        )
+        if progressed:
             stale = 0
+        else:
+            stale += 1
+            if stale >= 6:
+                break
+        prev_count = cur_count
+        prev_earliest = cur_earliest
         # Early stop: once we've scrolled past the requested start time, all
         # newer messages are already loaded — no need to crawl older history.
         if stop_dt is not None:
@@ -698,6 +764,14 @@ def _export_txt(messages: list[dict], chat_name: str, output_path: str) -> None:
             if n_img:
                 tag = f"[图片 ×{n_img}]" if n_img > 1 else "[图片]"
                 body = (body + " " + tag).strip() if body else tag
+            n_at = int(m.get("attach") or 0)
+            if n_at:
+                at_tag = f"[附件 ×{n_at}]" if n_at > 1 else "[附件]"
+                body = (body + " " + at_tag).strip() if body else at_tag
+            rx = m.get("reactions") or []
+            if rx:
+                rx_tag = "[回应: " + " ".join(rx) + "]"
+                body = (body + "  " + rx_tag).strip() if body else rx_tag
             prefix = f"[{t}] " if t else ""
             f.write(f"{prefix}{sender}: {body}\n")
 
@@ -720,6 +794,9 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .msg .bubble {{ background: #fff; border: 1px solid #e3e3ea; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }}
 .msg .bubble img.attach {{ display: block; max-width: 360px; max-height: 360px; margin: 6px 0 2px; border-radius: 6px; border: 1px solid #e3e3ea; }}
 .msg .bubble .imgmiss {{ color: #999; font-size: 12px; }}
+.msg .bubble .attachfile {{ display: inline-block; margin-top: 6px; padding: 4px 10px; background: #f3f2f1; border: 1px solid #e1dfdd; border-radius: 6px; font-size: 13px; color: #444; }}
+.msg .reactions {{ margin-top: 5px; }}
+.msg .reactions .chip {{ display: inline-block; background: #eef0fb; border: 1px solid #d6d9f0; border-radius: 12px; padding: 1px 8px; margin: 2px 4px 0 0; font-size: 12px; color: #444; }}
 .date-sep {{ text-align: center; margin: 18px 0; font-size: 12px; color: #999; }}
 </style>
 </head>
@@ -748,9 +825,21 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
             miss = int(m.get("imgmiss") or 0)
             if miss:
                 imgs_html += f'<div class="imgmiss">[{miss} 张图片未能保存]</div>'
+            n_at = int(m.get("attach") or 0)
+            at_html = ""
+            if n_at:
+                label = f"📎 附件 ×{n_at}" if n_at > 1 else "📎 附件"
+                at_html = f'<div class="attachfile">{label}</div>'
+            rx = m.get("reactions") or []
+            rx_html = ""
+            if rx:
+                chips = "".join(
+                    f'<span class="chip">{html_mod.escape(r)}</span>' for r in rx
+                )
+                rx_html = f'<div class="reactions">{chips}</div>'
             f.write('<div class="msg">\n')
             f.write(f'<div class="meta">{sender}<span class="time">{html_mod.escape(time_short)}</span></div>\n')
-            f.write(f'<div class="bubble">{body}{imgs_html}</div>\n')
+            f.write(f'<div class="bubble">{body}{imgs_html}{at_html}{rx_html}</div>\n')
             f.write('</div>\n')
         f.write("</body>\n</html>\n")
 

@@ -14,6 +14,7 @@ Profile selection priority (see ``resolve_profile``):
 """
 import json
 import os
+import re
 import shutil
 import tempfile
 
@@ -103,6 +104,12 @@ def get_automation_user_data_dir() -> str:
     signs into once; the session is then reused on every subsequent run while
     their normal Edge stays open and untouched.
 
+    The automation profile is scoped to the *selected* Edge profile (via the
+    ``VT_EDGE_PROFILE`` env var). Without this scoping a single shared session
+    is reused for every account, so whichever account was signed into first
+    "wins" and switching profiles in the UI has no effect. Keying the directory
+    on the chosen profile gives each account its own persistent session.
+
     Honours the ``VT_EDGE_AUTOMATION_DIR`` override.
     """
     override = os.environ.get("VT_EDGE_AUTOMATION_DIR")
@@ -111,6 +118,14 @@ def get_automation_user_data_dir() -> str:
         return override
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
     path = os.path.join(base, "VideoTranscript", "edge-automation")
+
+    # Scope to the selected Edge profile so each account keeps a separate
+    # signed-in session instead of silently reusing the first one used.
+    profile_key = (os.environ.get("VT_EDGE_PROFILE") or "").strip()
+    if profile_key:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", profile_key)
+        path = os.path.join(path, safe)
+
     os.makedirs(path, exist_ok=True)
     return path
 
