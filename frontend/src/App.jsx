@@ -4,6 +4,17 @@ import HomePage from './HomePage'
 import VideoTranscript from './VideoTranscript'
 import WebToPdf from './WebToPdf'
 import TeamsTranscript from './TeamsTranscript'
+import DsvPagePdf from './DsvPagePdf'
+
+import TeamsChat from './TeamsChat'
+import BookConverter from './BookConverter'
+import WechatExport from './WechatExport'
+import DiscordExport from './DiscordExport'
+import ThreadsDownload from './ThreadsDownload'
+import AudioRecorder from './AudioRecorder'
+import ScreenRecorder from './ScreenRecorder'
+import ExcelSearch from './ExcelSearch'
+
 
 function App() {
   // --- Auth state ---
@@ -122,7 +133,18 @@ function App() {
       {currentTool === null && <HomePage onSelectTool={setCurrentTool} />}
       {currentTool === 'transcript' && <VideoTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'webtopdf' && <WebToPdf token={token} onAuthError={handleLogout} />}
-      {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
+      {currentTool === 'dsvpdf' && <DsvPagePdf token={token} onAuthError={handleLogout} />}
+      {currentTool === 'transcript' && (<VideoTranscript token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'teamschat' && (<TeamsChatExport token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'bookconvert' && (<BookConverter token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'wechat' && (<WechatExport token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'discord' && (<DiscordExport token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'threads' && (<ThreadsDownload token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'audio' && (<AudioRecorder token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'screen' && (<ScreenRecorder token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'excelsearch' && (<ExcelSearch token={token} onAuthError={handleLogout} />)}
+
+
     </div>
   )
 }
