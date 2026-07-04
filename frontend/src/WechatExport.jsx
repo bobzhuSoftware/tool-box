@@ -9,6 +9,7 @@ function WechatExport({ token, onAuthError }) {
   const [connected, setConnected] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportResult, setExportResult] = useState(null)
+  const [completedExports, setCompletedExports] = useState([]) // { name, job_id, count }
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [exportFormat, setExportFormat] = useState('html')
@@ -50,6 +51,7 @@ function WechatExport({ token, onAuthError }) {
     if (selectedContacts.length === 0) return
     setExporting(true)
     setExportResult(null)
+    setCompletedExports([])
 
     for (const contact of selectedContacts) {
       addLog({ type: 'status', message: `正在导出: ${contact.name}...` })
@@ -77,10 +79,8 @@ function WechatExport({ token, onAuthError }) {
         await readSSEStream(res, (event) => {
           if (event.type === 'done') {
             setExportResult(event)
+            setCompletedExports((prev) => [...prev, { name: contact.name, job_id: event.job_id, count: event.count }])
             addLog({ type: 'done', message: `✓ ${contact.name}: 导出完成 (${event.count} 条消息)` })
-            // Auto-download
-            const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
-            window.open(`/api/wechat/download/${event.job_id}${authParam}`, '_blank')
           } else if (event.type === 'error') {
             addLog({ type: 'error', message: `${contact.name}: ${event.message}` })
           } else {
@@ -213,21 +213,21 @@ function WechatExport({ token, onAuthError }) {
               <span style={{ fontSize: '0.9rem', fontWeight: 500, whiteSpace: 'nowrap' }}>时间范围（可选）</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, flexWrap: 'wrap' }}>
                 <input
-                  type="date"
+                  type="datetime-local"
                   value={startDate}
                   onChange={(e) => setStartDate(e.target.value)}
                   max={endDate || undefined}
                   disabled={exporting}
-                  style={{ flex: 1, minWidth: '130px' }}
+                  style={{ flex: 1, minWidth: '170px' }}
                 />
                 <span style={{ color: '#888' }}>至</span>
                 <input
-                  type="date"
+                  type="datetime-local"
                   value={endDate}
                   onChange={(e) => setEndDate(e.target.value)}
                   min={startDate || undefined}
                   disabled={exporting}
-                  style={{ flex: 1, minWidth: '130px' }}
+                  style={{ flex: 1, minWidth: '170px' }}
                 />
                 {(startDate || endDate) && (
                   <button
@@ -262,6 +262,32 @@ function WechatExport({ token, onAuthError }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {completedExports.length > 0 && (
+        <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+          {completedExports.map((item) => {
+            const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
+            return (
+              <div key={item.job_id} className="pdf-result">
+                <div className="pdf-result-info">
+                  <span className="pdf-result-icon">💬</span>
+                  <div>
+                    <div className="pdf-result-title">{item.name}</div>
+                    <div className="pdf-result-url">{item.count} 条消息</div>
+                  </div>
+                </div>
+                <a
+                  href={`/api/wechat/download/${item.job_id}${authParam}`}
+                  download
+                  className="btn-primary pdf-download-btn"
+                >
+                  ↓ 下载
+                </a>
+              </div>
+            )
+          })}
         </div>
       )}
     </>

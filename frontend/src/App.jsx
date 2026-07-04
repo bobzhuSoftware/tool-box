@@ -7,6 +7,7 @@ import TeamsTranscript from './TeamsTranscript'
 import DsvPagePdf from './DsvPagePdf'
 
 import TeamsChat from './TeamsChat'
+import CopilotExport from './CopilotExport'
 import BookConverter from './BookConverter'
 import WechatExport from './WechatExport'
 import DiscordExport from './DiscordExport'
@@ -133,9 +134,11 @@ function App() {
       {currentTool === null && <HomePage onSelectTool={setCurrentTool} />}
       {currentTool === 'transcript' && <VideoTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'webtopdf' && <WebToPdf token={token} onAuthError={handleLogout} />}
+      {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
       {currentTool === 'dsvpdf' && <DsvPagePdf token={token} onAuthError={handleLogout} />}
       {currentTool === 'transcript' && (<VideoTranscript token={token} onAuthError={handleLogout} />)}
-      {currentTool === 'teamschat' && (<TeamsChatExport token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'teamschat' && (<TeamsChat token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'copilotchat' && (<CopilotExport token={token} onAuthError={handleLogout} />)}
       {currentTool === 'bookconvert' && (<BookConverter token={token} onAuthError={handleLogout} />)}
       {currentTool === 'wechat' && (<WechatExport token={token} onAuthError={handleLogout} />)}
       {currentTool === 'discord' && (<DiscordExport token={token} onAuthError={handleLogout} />)}

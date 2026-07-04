@@ -161,40 +161,85 @@ def _validate_key_for_db(db_path, key_bytes, reserve=RESERVE_3X):
         return False
 
 
+def _decrypt_page(page_data, key_bytes, is_page1=False, reserve=RESERVE_3X):
+    """Decrypt a single SQLCipher page. Returns plaintext page bytes."""
+    if is_page1:
+        encrypted = page_data[16:PAGE_SIZE - reserve]
+        reserve_data = page_data[PAGE_SIZE - reserve:]
+    else:
+        encrypted = page_data[:PAGE_SIZE - reserve]
+        reserve_data = page_data[PAGE_SIZE - reserve:]
+    iv = reserve_data[:IV_SIZE]
+    cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(encrypted)
+    if is_page1:
+        full_page = (SQLITE_HEADER + decrypted)[:PAGE_SIZE].ljust(PAGE_SIZE, b'\x00')
+    else:
+        full_page = decrypted[:PAGE_SIZE].ljust(PAGE_SIZE, b'\x00')
+    return full_page
+
+
+def _read_wal_pages(wal_path, key_bytes, reserve=RESERVE_3X):
+    """
+    Read and decrypt a SQLCipher WAL file. Returns a dict {page_num: plaintext_page_bytes}
+    with the latest version of each page (WAL frames are applied in order).
+    WAL header: 32 bytes. Each frame: 24-byte header + PAGE_SIZE encrypted page data.
+    """
+    WAL_HEADER_SIZE = 32
+    WAL_FRAME_HEADER_SIZE = 24
+    wal_pages = {}
+    try:
+        with open(wal_path, "rb") as f:
+            wal_data = f.read()
+        if len(wal_data) < WAL_HEADER_SIZE:
+            return wal_pages
+        # Parse frames
+        offset = WAL_HEADER_SIZE
+        frame_size = WAL_FRAME_HEADER_SIZE + PAGE_SIZE
+        while offset + frame_size <= len(wal_data):
+            frame_header = wal_data[offset:offset + WAL_FRAME_HEADER_SIZE]
+            page_num = int.from_bytes(frame_header[0:4], "big")
+            page_data = wal_data[offset + WAL_FRAME_HEADER_SIZE:offset + WAL_FRAME_HEADER_SIZE + PAGE_SIZE]
+            if page_num >= 1 and len(page_data) == PAGE_SIZE:
+                try:
+                    plaintext = _decrypt_page(page_data, key_bytes, is_page1=(page_num == 1), reserve=reserve)
+                    wal_pages[page_num] = plaintext
+                except Exception:
+                    pass
+            offset += frame_size
+    except Exception:
+        pass
+    return wal_pages
+
+
 def _decrypt_database(db_path, key_bytes, output_path, reserve=RESERVE_3X):
     """
     Decrypt a full SQLCipher database to a plaintext SQLite file.
     WeChat 3.x: AES-256-CBC, key used directly, PAGE_SIZE=4096, RESERVE=48.
+    Also applies any pending WAL (Write-Ahead Log) frames so that messages
+    written since the last checkpoint are included.
     """
     with open(db_path, "rb") as f:
         file_data = f.read()
 
     total_pages = len(file_data) // PAGE_SIZE
 
+    # Decrypt main database pages
+    pages = {}
+    for page_num in range(1, total_pages + 1):
+        offset = (page_num - 1) * PAGE_SIZE
+        page = file_data[offset:offset + PAGE_SIZE]
+        pages[page_num] = _decrypt_page(page, key_bytes, is_page1=(page_num == 1), reserve=reserve)
+
+    # Apply WAL pages on top (WAL contains newer/uncommitted data from running WeChat)
+    wal_path = db_path + "-wal"
+    if os.path.isfile(wal_path):
+        wal_pages = _read_wal_pages(wal_path, key_bytes, reserve=reserve)
+        pages.update(wal_pages)  # WAL pages override main DB pages
+
     with open(output_path, "wb") as f:
-        for page_num in range(1, total_pages + 1):
-            offset = (page_num - 1) * PAGE_SIZE
-            page = file_data[offset:offset + PAGE_SIZE]
-
-            if page_num == 1:
-                # Page 1: first 16 bytes are salt (unencrypted)
-                encrypted = page[16:PAGE_SIZE - reserve]
-                reserve_data = page[PAGE_SIZE - reserve:]
-            else:
-                encrypted = page[:PAGE_SIZE - reserve]
-                reserve_data = page[PAGE_SIZE - reserve:]
-
-            iv = reserve_data[:IV_SIZE]
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
-            decrypted = cipher.decrypt(encrypted)
-
-            if page_num == 1:
-                # Prepend SQLite header (replaces the salt area)
-                full_page = (SQLITE_HEADER + decrypted)[:PAGE_SIZE].ljust(PAGE_SIZE, b'\x00')
-            else:
-                full_page = decrypted[:PAGE_SIZE].ljust(PAGE_SIZE, b'\x00')
-
-            f.write(full_page)
+        for page_num in range(1, max(pages.keys()) + 1):
+            f.write(pages.get(page_num, b'\x00' * PAGE_SIZE))
 
 
 def _find_key_for_db(db_path, key_hex_set):
@@ -1019,16 +1064,24 @@ def cmd_export(data_dir_arg, contact_id, output_path, start_date=None, end_date=
     start_ts = None
     end_ts = None
     if start_date:
-        try:
-            start_ts = datetime.strptime(start_date, "%Y-%m-%d").timestamp()
-        except ValueError:
-            pass
+        for _date_fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+            try:
+                start_ts = datetime.strptime(start_date, _date_fmt).timestamp()
+                break
+            except ValueError:
+                pass
     if end_date:
-        try:
-            # End of the selected day (23:59:59)
-            end_ts = datetime.strptime(end_date, "%Y-%m-%d").timestamp() + 86399
-        except ValueError:
-            pass
+        for _date_fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(end_date, _date_fmt)
+                # If only a date was given (no time), extend to end of day
+                if _date_fmt == "%Y-%m-%d":
+                    end_ts = dt.timestamp() + 86399
+                else:
+                    end_ts = dt.timestamp()
+                break
+            except ValueError:
+                pass
 
     date_desc = ""
     if start_date and end_date:
@@ -1102,7 +1155,38 @@ def cmd_export(data_dir_arg, contact_id, output_path, start_date=None, end_date=
                 pass
 
     if not all_messages:
-        print(f"ERROR:未找到与 {contact_id} 的聊天记录。", flush=True)
+        if start_ts is not None or end_ts is not None:
+            # Retry without time filter to check if messages exist at all
+            all_messages_total = []
+            for db_path in msg_dbs:
+                key = _find_key_for_db(db_path, key_hex_set)
+                if not key:
+                    continue
+                tmp_db2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+                tmp_db2.close()
+                try:
+                    _decrypt_database(db_path, key, tmp_db2.name)
+                    all_messages_total.extend(_get_messages_for_contact(tmp_db2.name, contact_id))
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.unlink(tmp_db2.name)
+                    except OSError:
+                        pass
+            if all_messages_total:
+                all_messages_total.sort(key=lambda m: m.get("time") or 0)
+                first_ts = all_messages_total[0].get("time", 0)
+                last_ts = all_messages_total[-1].get("time", 0)
+                first_str = datetime.fromtimestamp(first_ts).strftime("%Y-%m-%d %H:%M") if first_ts else "?"
+                last_str = datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d %H:%M") if last_ts else "?"
+                print(f"ERROR:在指定时间范围内未找到与 {contact_id} 的聊天记录。"
+                      f"该联系人共有 {len(all_messages_total)} 条消息，"
+                      f"最早：{first_str}，最新：{last_str}。请调整时间范围。", flush=True)
+            else:
+                print(f"ERROR:未找到与 {contact_id} 的聊天记录。", flush=True)
+        else:
+            print(f"ERROR:未找到与 {contact_id} 的聊天记录。", flush=True)
         return
 
     # Sort by time

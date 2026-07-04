@@ -45,6 +45,14 @@ function HomePage({ onSelectTool }) {
       tags: ['Teams', '聊天记录', 'Export'],
     },
     {
+      id: 'copilotchat',
+      icon: '🤖',
+      title: 'Copilot 对话导出',
+      description:
+        '粘贴一条 Microsoft 365 Copilot 对话链接，通过已登录的 Edge 会话抓取整段对话并导出为 HTML/TXT。需要已在 Edge 登录 Microsoft 365。',
+      tags: ['Copilot', 'M365', 'Export'],
+    },
+    {
       id: 'bookconvert',
       icon: '📚',
       title: 'Book Format Converter',
