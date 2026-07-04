@@ -375,6 +375,34 @@ async def run(url: str, output_path: str):
             except Exception:
                 pass
 
+            # networkidle fires when the M365 shell/CDN requests settle, but the
+            # Stream video player hydrates lazily after that — wait for it
+            # explicitly before attempting any interaction.
+            status("Waiting for video player to initialize…")
+            _player_selectors = [
+                'video',
+                '[class*="StreamPlayer" i]',
+                '[class*="stream-player" i]',
+                '[data-automation-id*="videoPlayer" i]',
+                '.od-VideoPlayer',
+                '[class*="videoPlayer" i]',
+            ]
+            for _pa in range(5):        # up to ~40 s
+                if transcript_meta:
+                    break
+                _found = False
+                for _psel in _player_selectors:
+                    try:
+                        await page.wait_for_selector(_psel, timeout=8000)
+                        _found = True
+                        break
+                    except Exception:
+                        continue
+                if _found:
+                    status("Video player detected.")
+                    break
+                status(f"Player not visible yet, retrying… ({(_pa + 1) * 8}s elapsed)")
+
             # The recording page can load successfully (URL stays on stream.aspx)
             # yet show an in-page "You don't have access" notice when the signed-in
             # account lacks permission. Detect that now and fail with a clear,
@@ -409,7 +437,7 @@ async def run(url: str, output_path: str):
                             await btn.click()
                             clicked = True
                             status("Clicked transcript button, waiting for data…")
-                            await asyncio.sleep(3)
+                            await asyncio.sleep(8)
                             break
                     except Exception:
                         continue
@@ -430,12 +458,25 @@ async def run(url: str, output_path: str):
                     pass
 
             status("Waiting for transcript metadata…")
-            for i in range(30):
+            for i in range(90):
                 await asyncio.sleep(1)
                 if transcript_meta:
                     break
                 if i % 10 == 9:
                     status(f"Still waiting… ({i+1}s)")
+                # Re-click the transcript button every 20 s in case the player
+                # was not fully hydrated on the first attempt.
+                if not transcript_meta and i > 0 and i % 20 == 19:
+                    status("Retrying transcript button click…")
+                    for sel in transcript_selectors:
+                        try:
+                            btn = page.locator(sel).first
+                            if await btn.is_visible(timeout=1000):
+                                await btn.click()
+                                await asyncio.sleep(5)
+                                break
+                        except Exception:
+                            continue
 
             # Fallback: extract driveId/itemId from captured URLs and call transcript API directly
             if not transcript_meta:
@@ -547,17 +588,16 @@ async def run(url: str, output_path: str):
 
             status("Downloading transcript content…")
             try:
-                result = await page.evaluate(f"""
-                    async () => {{
-                        const resp = await fetch({json.dumps(download_url)}, {{credentials: 'include'}});
-                        const status = resp.status;
-                        const text = await resp.text();
-                        return {{status, text, size: text.length}};
-                    }}
-                """)
-                http_status = result["status"]
-                vtt_text = result["text"]
-                size_bytes = result["size"]
+                # Use Playwright's native request API instead of page.evaluate/fetch.
+                # The temporaryDownloadUrl is a pre-signed cross-origin URL (Azure Blob /
+                # SharePoint CDN); fetching it from the page JS context fails with
+                # "TypeError: Failed to fetch" because the CORS preflight is rejected for
+                # credentialed cross-origin requests. ctx.request bypasses CORS entirely
+                # while still using the browser session's cookies when needed.
+                api_response = await ctx.request.get(download_url)
+                http_status = api_response.status
+                vtt_text = await api_response.text()
+                size_bytes = len(vtt_text)
             except Exception as e:
                 print(f"ERROR:Download failed: {e}", flush=True)
                 await ctx.close()
