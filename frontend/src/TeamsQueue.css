@@ -1,0 +1,218 @@
+/* ---- Floating task-queue panel (fixed, bottom-right) ---- */
+.tq-root {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+/* Toggle button */
+.tq-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 1rem;
+  background: #1a1a2e;
+  color: #fff;
+  border: none;
+  border-radius: 24px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.22);
+  transition: background 0.2s, transform 0.1s;
+  user-select: none;
+}
+
+.tq-toggle:hover {
+  background: #2d2d4e;
+  transform: translateY(-1px);
+}
+
+.tq-toggle--running {
+  background: #2563eb;
+  animation: tq-pulse 2s ease-in-out infinite;
+}
+
+@keyframes tq-pulse {
+  0%,
+  100% { box-shadow: 0 2px 12px rgba(37, 99, 235, 0.35); }
+  50%  { box-shadow: 0 2px 24px rgba(37, 99, 235, 0.65); }
+}
+
+.tq-badge-count {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  padding: 0 0.45rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/* Panel */
+.tq-panel {
+  width: 330px;
+  max-height: 440px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
+  border: 1px solid #e8e8f0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tq-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.7rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  background: #f7f7fc;
+  border-bottom: 1px solid #e8e8f0;
+  flex-shrink: 0;
+}
+
+.tq-panel-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #aaa;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.15rem 0.35rem;
+  border-radius: 4px;
+}
+
+.tq-panel-close:hover {
+  color: #444;
+  background: #eee;
+}
+
+/* Job list */
+.tq-list {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.tq-item {
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid #f0f0f8;
+  transition: background 0.13s;
+}
+
+.tq-item--done {
+  cursor: pointer;
+}
+.tq-item--done:hover {
+  background: #f4f4ff;
+}
+
+.tq-item--running {
+  background: #fafdff;
+}
+
+.tq-item--error {
+  background: #fff8f8;
+}
+
+.tq-item-top {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.tq-status-icon {
+  font-size: 0.9rem;
+  flex-shrink: 0;
+}
+
+.tq-item-name {
+  flex: 1;
+  font-size: 0.83rem;
+  font-weight: 600;
+  color: #1a1a2e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tq-item-del {
+  background: none;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  flex-shrink: 0;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.tq-item-del:hover:not(:disabled) {
+  color: #e44;
+  background: #fee;
+}
+
+.tq-item-del:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+/* Stop button for running jobs */
+.tq-item-stop {
+  color: #e44;
+  opacity: 0.7;
+}
+
+.tq-item-stop:hover {
+  color: #c00 !important;
+  background: #fee !important;
+  opacity: 1;
+}
+
+.tq-item-msg {
+  margin-top: 0.28rem;
+  font-size: 0.76rem;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tq-item-hint {
+  margin-top: 0.22rem;
+  font-size: 0.74rem;
+  color: #646cff;
+  font-weight: 500;
+}
+
+.tq-item-err {
+  margin-top: 0.28rem;
+  font-size: 0.76rem;
+  color: #dc2626;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Source icon (📋 / 📄) before the job name */
+.tq-item-source {
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+/* Non-clickable items (PDF running/error) — suppress pointer */
+.tq-item--no-click {
+  cursor: default;
+}
+.tq-item--no-click:hover {
+  background: inherit;
+}

@@ -22,6 +22,7 @@ import asyncio
 import html as html_mod
 import io
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -37,6 +38,58 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 from browser_utils import ensure_automation_profile, automation_profile_signed_in  # noqa: E402
 
 TEAMS_URL = "https://teams.microsoft.com/v2/"
+
+# ---------------------------------------------------------------------------
+# Selector configuration
+# ---------------------------------------------------------------------------
+# All CSS selectors are stored in teams_chat_selectors.json (same directory).
+# When Microsoft changes the Teams web UI and a selector breaks, update ONLY
+# the JSON file — no Python code changes required.
+# Run:  python teams_chat_worker.py diagnose   to check which ones still work.
+
+_SELECTOR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "teams_chat_selectors.json")
+
+_DEFAULT_SELECTORS: dict = {
+    "app_bar_wrapper":       '[data-tid="app-bar-wrapper"]',
+    "chat_keyboard_shortcut": "Control+Shift+2",
+    "chat_nav_selectors": [
+        '[data-tid="app-bar-wrapper"] button[aria-label*="Chat" i]',
+        'button[aria-label^="Chat" i]',
+        'button[aria-label*="Chat" i]',
+        '[aria-label*="\u804a\u5929"]',
+    ],
+    "chat_rail":      '[data-tid="simple-collab-dnd-rail"]',
+    "chat_item_role": "treeitem",
+    "message":        '[data-tid="chat-pane-message"]',
+    "message_author": '[data-tid="message-author-name"]',
+    "reaction_summary": '[data-tid="diverse-reaction-summary"]',
+    "reaction_pill":    '[data-tid="diverse-reaction-pill-button"]',
+    "attachment_grid":  '[data-tid="file-attachment-grid"]',
+    "scroll_cands": [
+        '[data-tid="message-pane-list-viewport"]',
+        '[data-tid="message-pane-list-runway"]',
+        '[data-tid="message-pane-body"]',
+    ],
+}
+
+
+def _load_selectors() -> dict:
+    """Load selector overrides from teams_chat_selectors.json, merged with defaults."""
+    merged = dict(_DEFAULT_SELECTORS)
+    try:
+        with open(_SELECTOR_FILE, encoding="utf-8") as f:
+            overrides = json.load(f)
+        for k, v in overrides.items():
+            if k.startswith("_"):
+                merged[k] = v  # preserve _verified / _comment for display
+            else:
+                merged[k] = v
+    except (OSError, json.JSONDecodeError):
+        pass  # silently use built-in defaults
+    return merged
+
+
+SEL: dict = _load_selectors()
 
 
 def status(msg: str) -> None:
@@ -107,9 +160,12 @@ async def _open_teams(p):
                 continue
             try:
                 shell = await pg.evaluate(
-                    """() => !!document.querySelector(
-                        '[data-tid="me-control-avatar"], [data-tid="app-bar-wrapper"]'
-                    )"""
+                    """() => {
+                        const wrapper = document.querySelector('[data-tid="app-bar-wrapper"]');
+                        if (!wrapper) return false;
+                        // Also require nav buttons to be rendered (not just the wrapper shell)
+                        return wrapper.querySelectorAll('button').length > 0;
+                    }"""
                 )
             except Exception:
                 shell = False
@@ -142,21 +198,49 @@ async def _open_teams(p):
 
 
 async def _goto_chat_list(page) -> None:
-    """Make sure the Chat list rail is visible by clicking the Chat app-bar button."""
+    """Make sure the Chat list rail is visible by clicking the Chat app-bar button.
+
+    Teams web v2 (2026+) removed the stable [data-tid="app-bar-chat"] selector;
+    nav buttons now carry GUID-based data-tids.  We locate the Chat button by
+    aria-label, scoped to [data-tid="app-bar-wrapper"] to avoid false matches on
+    buttons like "Find in chat" or "More chat options" inside the chat pane.
+    is_visible() is deliberately NOT used because it returns False in --headless=new
+    mode even for interactive elements, causing the click to be silently skipped.
+    """
+    clicked = False
+    # CSS selectors tried in order — most specific first.
     chat_nav_selectors = [
-        'button[aria-label*="Chat" i]',
-        '[data-tid="app-bar-chat"]',
-        'button[data-tid="app-bar-chat"]',
-        '[aria-label*="聊天"]',
+        '[data-tid="app-bar-wrapper"] button[aria-label*="Chat" i]',  # scoped, preferred
+        'button[aria-label^="Chat" i]',   # starts-with "Chat" → avoids "Find in chat"
+        'button[aria-label*="Chat" i]',   # broader fallback
+        '[aria-label*="聊天"]',            # Chinese locale
     ]
     for sel in chat_nav_selectors:
         try:
             btn = page.locator(sel).first
-            if await btn.count() and await btn.is_visible():
+            if await btn.count():
                 await btn.click()
+                clicked = True
                 break
         except Exception:
             continue
+
+    if not clicked:
+        # Final fallback: JS-based click bypasses all visibility / interaction
+        # guards and works even when the element has not been painted yet.
+        try:
+            await page.evaluate("""
+                () => {
+                    const wrapper = document.querySelector('[data-tid="app-bar-wrapper"]');
+                    if (!wrapper) return;
+                    const btn = [...wrapper.querySelectorAll('button')]
+                        .find(b => /chat/i.test(b.getAttribute('aria-label') || ''));
+                    if (btn) btn.click();
+                }
+            """)
+        except Exception:
+            pass
+
     # Wait for the chat rail (a Fluent v9 tree) to render.
     try:
         await page.wait_for_selector(
@@ -169,16 +253,20 @@ async def _goto_chat_list(page) -> None:
 
 
 async def _wait_for_rail(page) -> int:
-    """Resiliently wait for the chat rail to populate (it can be slow to fetch the
-    chat list from the server, especially under load). Polls for up to ~50s and
-    re-clicks the Chat nav periodically. Returns the number of tree items found."""
+    """Resiliently wait for the chat rail to populate. Polls up to ~50 s and
+    re-clicks Chat nav periodically. Returns the treeitem count found.
+    Selectors come from SEL (teams_chat_selectors.json)."""
+    rail_sel  = SEL.get("chat_rail", '[data-tid="simple-collab-dnd-rail"]')
+    item_role = SEL.get("chat_item_role", "treeitem")
+
     async def _count() -> int:
         try:
             return await page.evaluate(
-                """() => {
-                    const rail = document.querySelector('[data-tid="simple-collab-dnd-rail"]');
-                    return rail ? rail.querySelectorAll('[role="treeitem"]').length : 0;
-                }"""
+                """([s, role]) => {
+                    const rail = document.querySelector(s);
+                    return rail ? rail.querySelectorAll('[role="' + role + '"]').length : 0;
+                }""",
+                [rail_sel, item_role],
             )
         except Exception:
             return 0
@@ -368,15 +456,22 @@ async def _open_chat(page, chat_id: str, chat_name: str) -> bool:
     if not clicked:
         return False
 
-    # Wait for the message pane to populate.
-    try:
-        await page.wait_for_selector(
-            '[data-tid="chat-pane-message"], [data-tid="message-pane-layout"]',
-            timeout=15000,
-        )
-    except Exception:
-        pass
-    await asyncio.sleep(3)
+    # Wait for actual message elements to appear — NOT the layout container
+    # ([data-tid="message-pane-layout"]) which shows up immediately even when
+    # the chat history hasn't loaded yet, giving a false "ready" signal that
+    # causes the first scrape to collect 0 messages.
+    # External / cross-tenant chats can be slow on first load, so allow 30 s.
+    for _ in range(30):
+        try:
+            n = await page.evaluate(
+                '() => document.querySelectorAll(\'[data-tid="chat-pane-message"]\').length'
+            )
+            if n:
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    await asyncio.sleep(1)  # brief settle after first message appears
     return True
 
 
@@ -560,9 +655,11 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                     msg["imgmiss"] = msg.get("imgmiss", 0) + 1
 
     # The message pane renders lazily after the chat opens. Wait until at least
-    # one message is actually present (up to ~25s) before scraping; otherwise the
-    # first grab finds nothing and the stale counter ends the scrape empty.
-    for _ in range(25):
+    # one message is actually present before scraping; otherwise the first grab
+    # finds nothing and the stale counter ends the scrape empty.
+    # External / cross-tenant chats can be particularly slow on first load
+    # (network fetch from a remote tenant), so poll for up to 45 s.
+    for _ in range(45):
         n = await page.evaluate(
             '() => document.querySelectorAll(\'[data-tid="chat-pane-message"]\').length'
         )
@@ -881,11 +978,190 @@ async def export_chat(chat_id: str, chat_name: str, output_path: str,
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic: check live selectors against the running Teams web app
+# ---------------------------------------------------------------------------
+async def diagnose_selectors() -> None:
+    """Open Teams headlessly and verify every selector in teams_chat_selectors.json.
+
+    Usage:  python teams_chat_worker.py diagnose
+
+    Prints STATUS: lines for each selector showing found / NOT FOUND.
+    When something breaks after a Teams update, run this first — it tells you
+    exactly which selectors to fix, so you only need to update the JSON file.
+    """
+    from playwright.async_api import async_playwright
+
+    status("\u2500" * 60)
+    status("Teams Chat — selector diagnostic")
+    status(f"Config:   {_SELECTOR_FILE}")
+    status(f"Verified: {SEL.get('_verified', '') or '(built-in defaults)'}")
+    status("\u2500" * 60)
+
+    async with async_playwright() as p:
+        ctx, page, ok = await _open_teams(p)
+        try:
+            if not ok:
+                error("Cannot reach Teams — sign in first by running 'list'.")
+                return
+
+            # Navigate to Chat and wait for the rail to actually appear.
+            kbd = SEL.get("chat_keyboard_shortcut", "Control+Shift+2")
+            try:
+                await page.keyboard.press(kbd)
+            except Exception:
+                pass
+
+            rail_sel  = SEL.get("chat_rail", '[data-tid="simple-collab-dnd-rail"]')
+            item_role = SEL.get("chat_item_role", "treeitem")
+
+            # Wait up to 20 s for the rail to appear (keyboard shortcut needs time).
+            status("\nWaiting for chat rail after keyboard shortcut…")
+            for _ in range(20):
+                try:
+                    if await page.evaluate("(s) => !!document.querySelector(s)", rail_sel):
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+            else:
+                # Fallback: use full _goto_chat_list
+                await _goto_chat_list(page)
+                for _ in range(10):
+                    try:
+                        if await page.evaluate("(s) => !!document.querySelector(s)", rail_sel):
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
+
+            all_ok = True
+
+            # --- Point selectors (chat-list level) ---
+            status("\n▶ Level 1: Chat-list selectors (always present when Chat view is open)")
+            for name in (
+                "app_bar_wrapper",
+                "chat_rail",
+            ):
+                sel = SEL.get(name, "")
+                if not sel:
+                    status(f"  ⚠  {name:<22} not configured")
+                    continue
+                try:
+                    count = await page.evaluate(
+                        "(s) => document.querySelectorAll(s).length", sel
+                    )
+                    mark = "\u2713" if count else "\u2717"
+                    note = f"{count:>3} found" if count else "  0 found  \u2190 BROKEN"
+                    status(f"  {mark}  {name:<22} {note}   {sel!r}")
+                    if not count:
+                        all_ok = False
+                except Exception as ex:
+                    status(f"  \u2717  {name:<22} ERROR: {ex}")
+                    all_ok = False
+
+            # --- Chat rail items (fixed: list arg for Playwright evaluate) ---
+            rail_sel2 = SEL.get("chat_rail", "")
+            item_role2 = SEL.get("chat_item_role", "treeitem")
+            if rail_sel2:
+                try:
+                    n = await page.evaluate(
+                        """([s, role]) => {
+                            const rail = document.querySelector(s);
+                            return rail ? rail.querySelectorAll('[role="' + role + '"]').length : 0;
+                        }""",
+                        [rail_sel2, item_role2],
+                    )
+                    mark = "\u2713" if n else "\u2717"
+                    note = f"{n:>3} found" if n else "  0 found  \u2190 BROKEN"
+                    status(f"  {mark}  chat_item [{item_role2}]        {note}   inside {rail_sel2!r}")
+                    if not n:
+                        all_ok = False
+                except Exception as ex:
+                    status(f"  \u2717  chat_item [{item_role2}]        ERROR: {ex}")
+                    all_ok = False
+
+            # --- Level 2: Conversation selectors (click first chat) ---
+            status("\n\u25b6 Level 2: Conversation selectors")
+            status("  (only present inside an open chat \u2014 clicking first chat\u2026)")
+            _rs = rail_sel2 or '[data-tid="simple-collab-dnd-rail"]'
+            _ir = item_role2 or "treeitem"
+            entered_chat = False
+            try:
+                first = page.locator(f'{_rs} [role="{_ir}"]').first
+                if await first.count():
+                    await first.click()
+                    _msg = SEL.get("message", '[data-tid="chat-pane-message"]')
+                    for _ in range(25):
+                        if await page.evaluate("(s) => document.querySelectorAll(s).length", _msg):
+                            entered_chat = True
+                            break
+                        await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            if not entered_chat:
+                status("  \u26a0  Could not open a chat \u2014 conversation selectors skipped")
+            else:
+                await asyncio.sleep(1)
+                for name in ("message", "message_author", "reaction_summary",
+                             "reaction_pill", "attachment_grid"):
+                    sel = SEL.get(name, "")
+                    if not sel:
+                        status(f"  \u26a0  {name:<22} not configured")
+                        continue
+                    try:
+                        count = await page.evaluate(
+                            "(s) => document.querySelectorAll(s).length", sel
+                        )
+                        mark = "\u2713" if count else "\u26a0"
+                        note = f"{count:>3} found" if count else "  0 (ok if no msgs/reactions)"
+                        status(f"  {mark}  {name:<22} {note}   {sel!r}")
+                    except Exception as ex:
+                        status(f"  \u2717  {name:<22} ERROR: {ex}")
+                        all_ok = False
+
+            # --- Chat nav selectors ---
+            status("\n  Chat nav button selectors (tried in order):")
+            nav_sels = SEL.get("chat_nav_selectors", [])
+            for i, sel in enumerate(nav_sels):
+                try:
+                    count = await page.evaluate(
+                        "(s) => document.querySelectorAll(s).length", sel
+                    )
+                    mark = "\u2713" if count else "\u2717"
+                    note = f"{count} found" if count else "NOT FOUND"
+                    status(f"  [{i}] {mark} {note:<12} {sel!r}")
+                    if not count and i == 0:
+                        all_ok = False
+                except Exception as ex:
+                    status(f"  [{i}] \u2717 ERROR: {ex}")
+
+            status(f"  [K] \u2139  {kbd!r}  \u2014 Teams official binding, always valid")
+
+            # --- Summary ---
+            status("\n" + "\u2500" * 60)
+            if all_ok:
+                status("\u2705 Level-1 selectors all working.")
+            else:
+                status("\u274c Some Level-1 selectors are broken.")
+                status("   1. Note selectors showing 'BROKEN' in Level 1 above.")
+                status("   2. Open Teams in a browser, DevTools > Console, run:")
+                status("      document.querySelector('<broken selector>')")
+                status("   3. Find the replacement and update teams_chat_selectors.json.")
+                status("   No Python code changes needed.")
+            status("\u2500" * 60)
+
+            done({"diagnose": "ok" if all_ok else "broken"})
+        finally:
+            await ctx.close()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main() -> None:
     if len(sys.argv) < 2:
-        error("Usage: teams_chat_worker.py list | export <chat_id> <chat_name> <output> <start> <end> <format>")
+        error("Usage: teams_chat_worker.py list | export <...> | diagnose")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -902,6 +1178,8 @@ def main() -> None:
         end_date = sys.argv[6]
         fmt = sys.argv[7] if sys.argv[7] in ("html", "txt") else "html"
         asyncio.run(export_chat(chat_id, chat_name, output_path, start_date, end_date, fmt))
+    elif cmd == "diagnose":
+        asyncio.run(diagnose_selectors())
     else:
         error(f"Unknown command: {cmd}")
         sys.exit(1)

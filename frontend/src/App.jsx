@@ -4,6 +4,10 @@ import HomePage from './HomePage'
 import VideoTranscript from './VideoTranscript'
 import WebToPdf from './WebToPdf'
 import TeamsTranscript from './TeamsTranscript'
+import useTeamsQueue from './useTeamsQueue'
+import usePdfQueue from './usePdfQueue'
+import useTranscriptQueue from './useTranscriptQueue'
+import GlobalQueue from './GlobalQueue'
 import DsvPagePdf from './DsvPagePdf'
 
 import TeamsChat from './TeamsChat'
@@ -30,6 +34,44 @@ function App() {
 
   // --- Navigation state ---
   const [currentTool, setCurrentTool] = useState(null) // null = home page
+
+  // --- Background job queues ---
+  const { jobs: teamsJobs,      deleteJob: deleteTeamsJob      } = useTeamsQueue(token)
+  const { jobs: pdfJobs,        deleteJob: deletePdfJob        } = usePdfQueue(token)
+  const { jobs: transcriptJobs, deleteJob: deleteTranscriptJob } = useTranscriptQueue(token)
+  const [teamsInitialJob,      setTeamsInitialJob      ] = useState(null)
+  const [pdfInitialJob,        setPdfInitialJob        ] = useState(null)
+  const [transcriptInitialJob, setTranscriptInitialJob ] = useState(null)
+
+  // Merge all queues, tag with source, sort newest-first
+  const allJobs = [
+    ...teamsJobs.map(j      => ({ ...j, source: 'teams'      })),
+    ...pdfJobs.map(j        => ({ ...j, source: 'pdf'        })),
+    ...transcriptJobs.map(j => ({ ...j, source: 'transcript' })),
+  ].sort((a, b) => b.created_at - a.created_at)
+
+  const handleOpenTeamsJob = (job) => {
+    setTeamsInitialJob(job)
+    setCurrentTool('teams')
+  }
+
+  const handleOpenQueueJob = (job) => {
+    if (job.source === 'pdf') {
+      setPdfInitialJob(job)
+      setCurrentTool('webtopdf')
+    } else if (job.source === 'transcript') {
+      setTranscriptInitialJob(job)
+      setCurrentTool('transcript')
+    } else {
+      handleOpenTeamsJob(job)
+    }
+  }
+
+  const handleDeleteQueueJob = (job) => {
+    if (job.source === 'pdf') deletePdfJob(job.job_id)
+    else if (job.source === 'transcript') deleteTranscriptJob(job.job_id)
+    else deleteTeamsJob(job.job_id)
+  }
 
   // Validate stored token on startup
   useEffect(() => {
@@ -132,11 +174,31 @@ function App() {
       </div>
 
       {currentTool === null && <HomePage onSelectTool={setCurrentTool} />}
-      {currentTool === 'transcript' && <VideoTranscript token={token} onAuthError={handleLogout} />}
-      {currentTool === 'webtopdf' && <WebToPdf token={token} onAuthError={handleLogout} />}
-      {currentTool === 'teams' && <TeamsTranscript token={token} onAuthError={handleLogout} />}
+      {currentTool === 'transcript' && (
+        <VideoTranscript
+          token={token}
+          onAuthError={handleLogout}
+          initialJob={transcriptInitialJob}
+          onClearInitialJob={() => setTranscriptInitialJob(null)}
+        />
+      )}
+      {currentTool === 'webtopdf' && (
+        <WebToPdf
+          token={token}
+          onAuthError={handleLogout}
+          initialJob={pdfInitialJob}
+          onClearInitialJob={() => setPdfInitialJob(null)}
+        />
+      )}
+      {currentTool === 'teams' && (
+        <TeamsTranscript
+          token={token}
+          onAuthError={handleLogout}
+          initialJob={teamsInitialJob}
+          onClearInitialJob={() => setTeamsInitialJob(null)}
+        />
+      )}
       {currentTool === 'dsvpdf' && <DsvPagePdf token={token} onAuthError={handleLogout} />}
-      {currentTool === 'transcript' && (<VideoTranscript token={token} onAuthError={handleLogout} />)}
       {currentTool === 'teamschat' && (<TeamsChat token={token} onAuthError={handleLogout} />)}
       {currentTool === 'copilotchat' && (<CopilotExport token={token} onAuthError={handleLogout} />)}
       {currentTool === 'bookconvert' && (<BookConverter token={token} onAuthError={handleLogout} />)}
@@ -147,7 +209,11 @@ function App() {
       {currentTool === 'screen' && (<ScreenRecorder token={token} onAuthError={handleLogout} />)}
       {currentTool === 'excelsearch' && (<ExcelSearch token={token} onAuthError={handleLogout} />)}
 
-
+      <GlobalQueue
+        jobs={allJobs}
+        onOpenJob={handleOpenQueueJob}
+        onDeleteJob={handleDeleteQueueJob}
+      />
     </div>
   )
 }

@@ -1,39 +1,148 @@
 import { useState, useRef, useEffect } from 'react'
-import useSSEStream from './useSSEStream'
 import EdgeProfilePicker from './EdgeProfilePicker'
 
-function TeamsTranscript({ token, onAuthError }) {
+/**
+ * Teams Transcript tool — queue-based mode.
+ *
+ * Submitting a URL calls /api/teams-transcript/enqueue and returns immediately;
+ * the job runs in the background. Progress is polled every 2 s via
+ * /api/teams-transcript/status/:id so the user can freely navigate away and
+ * come back. Clicking a completed job in the global TeamsQueue panel passes
+ * `initialJob` here to restore the result view.
+ */
+function TeamsTranscript({ token, onAuthError, initialJob, onClearInitialJob }) {
   const [url, setUrl] = useState('')
-  const [result, setResult] = useState(null) // { job_id, name, lang }
-  const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
+  const [result, setResult] = useState(null)      // { job_id, name, lang }
+  const [progressLog, setProgressLog] = useState([])
+  const [loading, setLoading] = useState(false)   // true while polling a running job
+  const logContainerRef = useRef(null)
+  const pollRef = useRef(null)
+  const tokenRef = useRef(token)
+  useEffect(() => { tokenRef.current = token }, [token])
 
-  const authHeaders = () => token ? { Authorization: `Bearer ${token}` } : {}
+  // Auto-scroll the progress log
+  useEffect(() => {
+    const el = logContainerRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    if (nearBottom) el.scrollTop = el.scrollHeight
+  }, [progressLog])
+
+  // Stop polling on unmount
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+
+  const authHeaders = () =>
+    tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {}
+
+  // ---- polling helpers ----
+
+  const startPolling = (jobId) => {
+    if (pollRef.current) clearInterval(pollRef.current)
+
+    const doPoll = async () => {
+      try {
+        const res = await fetch(`/api/teams-transcript/status/${jobId}`, {
+          headers: authHeaders(),
+        })
+        if (!res.ok) {
+          if (res.status === 401) { onAuthError?.(); clearInterval(pollRef.current); return }
+          if (res.status === 404) {
+            // Job was cancelled/removed — stop polling silently
+            setLoading(false)
+            clearInterval(pollRef.current)
+            return
+          }
+          clearInterval(pollRef.current)
+          return
+        }
+        const job = await res.json()
+        setProgressLog(job.progress || [])
+
+        if (job.status === 'done') {
+          setResult({ job_id: jobId, ...job.result })
+          setLoading(false)
+          clearInterval(pollRef.current)
+        } else if (job.status === 'error') {
+          setLoading(false)
+          clearInterval(pollRef.current)
+        }
+      } catch { /* ignore transient network errors */ }
+    }
+
+    doPoll()
+    pollRef.current = setInterval(doPoll, 2000)
+  }
+
+  // ---- restore view when the user clicks a job in the global queue panel ----
+
+  useEffect(() => {
+    if (!initialJob) return
+    if (pollRef.current) clearInterval(pollRef.current)
+    setResult(null)
+    // Show the last known message immediately while the full log loads
+    setProgressLog(initialJob.last_message
+      ? [{ type: initialJob.status === 'error' ? 'error' : 'status', message: initialJob.last_message }]
+      : []
+    )
+
+    if (initialJob.status === 'done') {
+      setResult({ job_id: initialJob.job_id, ...initialJob.result })
+      setLoading(false)
+      // Fetch full progress log (one-shot — job is already finished)
+      fetch(`/api/teams-transcript/status/${initialJob.job_id}`, { headers: authHeaders() })
+        .then(r => r.ok ? r.json() : null)
+        .then(job => { if (job?.progress?.length) setProgressLog(job.progress) })
+        .catch(() => {})
+    } else if (initialJob.status === 'running') {
+      setLoading(true)
+      // startPolling fires doPoll() immediately, which loads the full log
+      startPolling(initialJob.job_id)
+    } else {
+      setLoading(false)
+      // error / cancelled — fetch full log once
+      fetch(`/api/teams-transcript/status/${initialJob.job_id}`, { headers: authHeaders() })
+        .then(r => r.ok ? r.json() : null)
+        .then(job => { if (job?.progress?.length) setProgressLog(job.progress) })
+        .catch(() => {})
+    }
+    onClearInitialJob?.()
+  }, [initialJob]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- submit ----
 
   const handleGenerate = async () => {
     if (!url.trim()) return
+    if (pollRef.current) clearInterval(pollRef.current)
     setResult(null)
+    setProgressLog([])
+    setLoading(true)
 
-    await streamSSE(
-      () => fetch('/api/teams-transcript/stream', {
+    try {
+      const res = await fetch('/api/teams-transcript/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ url: url.trim() }),
-      }),
-      {
-        onAuthError,
-        onEvent: (event) => {
-          if (event.type === 'done') {
-            setResult({ job_id: event.job_id, name: event.name, lang: event.lang })
-            addLog({ type: 'done', message: `✓ Transcript ready: ${event.name}.txt — click Download below` })
-          } else if (event.type === 'error') {
-            addLog({ type: 'error', message: event.message })
-          } else {
-            addLog({ type: 'status', message: event.message })
-          }
-        },
+      })
+      if (!res.ok) {
+        if (res.status === 401) { onAuthError?.(); setLoading(false); return }
+        const data = await res.json().catch(() => ({}))
+        setProgressLog([{ type: 'error', message: data.detail || `Server error (${res.status})` }])
+        setLoading(false)
+        return
       }
-    )
+      const { job_id } = await res.json()
+      setProgressLog([{
+        type: 'status',
+        message: '任务已提交，正在后台运行…可切换到其他工具，完成后从右下角任务面板跳回下载。',
+      }])
+      startPolling(job_id)
+    } catch (err) {
+      setProgressLog([{ type: 'error', message: err.message || 'Something went wrong' }])
+      setLoading(false)
+    }
   }
+
+  // ---- download ----
 
   const handleDownload = () => {
     const authParam = token ? `?token=${encodeURIComponent(token)}` : ''
@@ -65,7 +174,7 @@ function TeamsTranscript({ token, onAuthError }) {
       document.body.removeChild(a)
       URL.revokeObjectURL(blobUrl)
     } catch (err) {
-      addLog({ type: 'error', message: `Download failed: ${err.message}` })
+      setProgressLog(prev => [...prev, { type: 'error', message: `Download failed: ${err.message}` }])
     }
   }
 
@@ -76,6 +185,7 @@ function TeamsTranscript({ token, onAuthError }) {
       <div className="input-section">
         <p className="tool-description">
           Paste a Teams recording URL (SharePoint MP4 link or Stream page URL) to download the meeting transcript as a clean VTT file.
+          任务在后台运行，可随时切换到其他工具，完成后从右下角任务面板跳回下载。
         </p>
         <div className="url-row">
           <input
@@ -83,11 +193,10 @@ function TeamsTranscript({ token, onAuthError }) {
             placeholder="https://dsvcorp-my.sharepoint.com/.../Recording.mp4?web=1&..."
             value={url}
             onChange={(e) => { setUrl(e.target.value); setResult(null) }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !loading) handleGenerate() }}
-            disabled={loading}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleGenerate() }}
           />
-          <button onClick={handleGenerate} disabled={loading || !url.trim()}>
-            {loading ? 'Fetching…' : 'Get Transcript'}
+          <button onClick={handleGenerate} disabled={!url.trim()}>
+            提交任务
           </button>
         </div>
         <p style={{ fontSize: '13px', color: 'var(--text-muted, #888)', marginTop: '8px' }}>
@@ -105,6 +214,11 @@ function TeamsTranscript({ token, onAuthError }) {
               </div>
             ))}
           </div>
+          {loading && (
+            <p style={{ fontSize: '12px', color: 'var(--text-muted, #888)', marginTop: '6px' }}>
+              任务后台运行中，可切换至其他工具，此处每 2 秒自动刷新。
+            </p>
+          )}
         </div>
       )}
 

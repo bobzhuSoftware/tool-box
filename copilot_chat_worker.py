@@ -99,31 +99,64 @@ async def _open_copilot(p, url: str):
                 continue
         return False
 
-    async def _wait_ready(pg, secs: int) -> str:
+    async def _wait_ready(pg, secs: int, interactive: bool = False) -> str:
         """Poll until Copilot is ready. Returns 'ok'|'needlogin'|'timeout'.
 
-        Strategy: if we're on the right M365/Copilot domain and the body has
-        some children, count it as ready and let the scraper do the rest.
-        A transient login.* redirect is part of silent SSO — only count it as
-        needlogin when a real sign-in field is actually visible."""
+        interactive=False (headless): return 'needlogin' as soon as any auth
+          page is detected — caller will switch to a visible window.
+        interactive=True (visible window): treat auth pages (including corporate
+          SSO/STS/ADFS) as 'still in progress' and keep waiting; the user is
+          actively completing the login in the open window."""
         for i in range(secs):
             current = (pg.url or "").lower()
-            # Still on a login/auth redirect?
+            # ── Microsoft standard auth redirects ──────────────────────────
             if any(h in current for h in ("login.microsoftonline", "login.live",
                                            "login.windows", "msauth")):
-                if await _interactive_login_visible(pg):
-                    return "needlogin"
+                if not interactive:
+                    # Headless: if an interactive form appeared, switch to visible window.
+                    if await _interactive_login_visible(pg):
+                        return "needlogin"
+                # Interactive: user is filling in the form — keep waiting.
                 await asyncio.sleep(1)
                 continue
-            # On the Copilot / M365 domain — check if the SPA shell has rendered.
+            # ── Corporate SSO / ADFS / STS redirects ──────────────────────
+            _corp_auth = any(k in current for k in (
+                "adfs.", "/adfs/", "/adfs?", "sts.", "/sts/", "/saml", "/sso/", "sso.",
+            ))
+            if _corp_auth:
+                if not interactive:
+                    # Headless: can't complete corporate SSO silently — switch to
+                    # visible window so the user can authenticate.
+                    return "needlogin"
+                # Interactive: user is on the corporate login page — keep waiting.
+                await asyncio.sleep(1)
+                continue
+            # ── Copilot / M365 domain ─────────────────────────────────────
             if any(h in current for h in ("m365.cloud.microsoft", "microsoft365.com",
                                            "copilot.microsoft.com", "substrate.office.com")):
                 try:
-                    ready = await pg.evaluate(
-                        "() => document.body ? document.body.children.length > 2 : false"
+                    state = await pg.evaluate(
+                        """
+                        () => {
+                            if (!document.body) return 'loading';
+                            // Reject if the page is showing a sign-in form (embedded login)
+                            const hasLoginForm = !!document.querySelector(
+                                'input[type="password"], input[name="loginfmt"], #i0116, #i0118'
+                            );
+                            if (hasLoginForm) return 'needlogin';
+                            // Reject if title is literally "Sign In" / "Login"
+                            const title = (document.title || '').trim().toLowerCase();
+                            if (title === 'sign in' || title === 'login' || title === '\u767b\u5f55')
+                                return 'needlogin';
+                            // App shell is present when body has more than 2 children
+                            return document.body.children.length > 2 ? 'ok' : 'loading';
+                        }
+                        """
                     )
-                    if ready:
+                    if state == 'ok':
                         return "ok"
+                    if state == 'needlogin':
+                        return "needlogin"
                 except Exception:
                     pass
                 # After 25 s on the right domain, proceed anyway — let scraper try.
@@ -131,8 +164,10 @@ async def _open_copilot(p, url: str):
                     return "ok"
                 await asyncio.sleep(1)
                 continue
-            # Any other non-auth page — proceed optimistically.
+            # ── Any other non-auth page — check for login form before declaring ready —
             if current and not any(h in current for h in ("about:blank", "about:newtab")):
+                if await _interactive_login_visible(pg):
+                    return "needlogin"
                 return "ok"
             await asyncio.sleep(1)
         return "timeout"
@@ -142,7 +177,7 @@ async def _open_copilot(p, url: str):
     status("② 正在打开 Microsoft 365 Copilot 对话…")
     await _navigate(page, url)
     status("③ 等待页面加载（约需 10–20 秒）…")
-    state = await _wait_ready(page, 40)
+    state = await _wait_ready(page, 40, interactive=False)
     if state == "ok":
         return ctx, page, True
 
@@ -155,7 +190,7 @@ async def _open_copilot(p, url: str):
     status("需要登录：正在打开 Edge 窗口，请在该窗口登录 Microsoft 365（之后会自动记住）…")
     ctx, page = await _launch(headless=False)
     await _navigate(page, url)
-    state = await _wait_ready(page, 180)
+    state = await _wait_ready(page, 180, interactive=True)
     if state == "ok":
         status("登录成功，继续…")
         return ctx, page, True
@@ -214,34 +249,45 @@ async def _scrape_conversation(page) -> list[dict]:
         await asyncio.sleep(1)
 
     # 2) Find the scrollable conversation pane and crawl upward to load history.
-    #    Copilot lazy-loads older turns when the pane is scrolled to the top.
-    async def _scroll_to_top() -> int:
+    #    M365 Copilot uses a virtualised list — jumping scrollTop directly to 0
+    #    skips over the lazy-loading trigger points for intermediate batches.
+    #    Instead, scroll up one viewport at a time so each step fires the loader.
+    async def _scroll_up_one_page() -> list:
+        """Scroll up by one viewport height. Returns [at_top, element_count]."""
         return await page.evaluate(
             """(sels) => {
-                // Locate a turn, then walk up to the nearest scrollable ancestor.
                 let el = null;
                 for (const s of sels) { el = document.querySelector(s); if (el) break; }
-                if (!el) return 0;
+                if (!el) return [true, 0];
                 let sc = el.parentElement;
                 while (sc && sc.scrollHeight <= sc.clientHeight + 4) sc = sc.parentElement;
-                if (!sc) return 0;
-                sc.scrollTop = 0;
-                return sc.scrollHeight;
+                if (!sc) return [true, 0];
+                // Step up by one viewport so the lazy-loader fires for each batch.
+                sc.scrollTop = Math.max(0, sc.scrollTop - sc.clientHeight);
+                let n = 0;
+                for (const s of sels) { n = document.querySelectorAll(s).length; if (n) break; }
+                return [sc.scrollTop === 0, n];
             }""",
             _TURN_SELECTORS,
         )
 
     prev_count = await _turn_count()
     stale = 0
-    for i in range(120):
-        await _scroll_to_top()
-        await asyncio.sleep(1.1)
+    at_top = False
+    for i in range(200):
+        result = await _scroll_up_one_page()
+        at_top = bool(result[0]) if isinstance(result, list) else True
+        await asyncio.sleep(1.5)
         cur = await _turn_count()
         if cur > prev_count:
             stale = 0
         else:
             stale += 1
-            if stale >= 5:
+            # Confirmed at the very top and stable → no more messages will load.
+            if at_top and stale >= 3:
+                break
+            # Safety exit: not at top but nothing changed for 10 × 1.5 s = 15 s.
+            if stale >= 10:
                 break
         prev_count = cur
         if i % 8 == 7:
@@ -408,12 +454,130 @@ async def export_conversation(url: str, output_path: str, fmt: str) -> None:
                 if "conversation" not in current:
                     status("正在跳转到目标对话…")
                     await page.goto(url, wait_until="commit", timeout=60000)
-                    await asyncio.sleep(5)
             except Exception:
                 pass
 
+            # Gate: wait until real conversation message elements appear in the DOM
+            # (up to 40 s). Abort early if an embedded sign-in page is detected.
+            status("等待对话内容出现在页面中…")
+            _gate_reached = False
+            for _gi in range(40):
+                await asyncio.sleep(1)
+                # Check URL for corporate SSO/ADFS redirects.
+                # IMPORTANT: distinguish between two cases:
+                #   - Transient redirect (already authenticated): ADFS page has NO login
+                #     form and will auto-forward to M365 in a few seconds → keep waiting.
+                #   - Stuck on login page (not authenticated): ADFS page HAS a login form
+                #     → abort with a clear error.
+                _cur_url = (page.url or "").lower()
+                _not_m365 = not any(h in _cur_url for h in (
+                    "m365.cloud.microsoft", "microsoft365.com", "sharepoint.com",
+                    "copilot.microsoft.com",
+                ))
+                _corp_sso = any(k in _cur_url for k in (
+                    "adfs.", "/adfs/", "/adfs?", "sts.", "/sts/", "/saml", "/sso/", "sso.",
+                ))
+                if _corp_sso and _not_m365:
+                    # Check whether a login form is actually visible.  An authenticated
+                    # session passes through ADFS silently (no form), so we just wait.
+                    try:
+                        _has_login_form = await page.evaluate(
+                            "() => !!document.querySelector("
+                            "'input[type=\"password\"], input[name=\"loginfmt\"], #i0116')"
+                        )
+                    except Exception:
+                        _has_login_form = False
+                    if _has_login_form:
+                        error(
+                            f"页面跳转到企业 SSO 登录页（{page.url}）— "
+                            "当前 Edge profile 的 M365 会话已过期，"
+                            "请重试并在弹出的 Edge 窗口中完成登录。"
+                        )
+                        return
+                    # No login form: transient auth redirect, keep waiting.
+                    continue
+                try:
+                    _gate_state = await page.evaluate(
+                        """
+                        (sels) => {
+                            const title = (document.title || '').trim().toLowerCase();
+                            if (title === 'sign in' || title === 'login' || title === '\u767b\u5f55')
+                                return 'signin';
+                            if (document.querySelector(
+                                'input[type="password"], input[name="loginfmt"], #i0116'
+                            )) return 'signin';
+                            const found = sels.some(
+                                s => document.querySelectorAll(s).length > 0
+                            );
+                            return found ? 'ready' : 'loading';
+                        }
+                        """,
+                        _TURN_SELECTORS,
+                    )
+                    if _gate_state == 'ready':
+                        _gate_reached = True
+                        break
+                    if _gate_state == 'signin':
+                        error(
+                            "页面跳转到登录界面 — 当前 Edge profile 的 M365 会话已过期。"
+                            "请重试并在弹出的 Edge 窗口中完成登录。"
+                        )
+                        return
+                except Exception:
+                    pass
+                if _gi == 19:
+                    status("对话内容加载较慢，继续等待…")
+
+            if not _gate_reached:
+                # Timed out waiting for message elements; do a final title check
+                try:
+                    _t = await page.title()
+                    if any(w in _t.lower() for w in ("sign in", "login", "登录")):
+                        error(
+                            f"页面显示登录界面（标题：{_t}）— 当前 Edge profile 未能完成认证，"
+                            "请重试并在弹出窗口中完成登录。"
+                        )
+                        return
+                except Exception:
+                    pass
+                status("未检测到消息元素，尝试继续抓取…")
+            else:
+                # Phase 2: messages appeared, but Copilot answers stream in gradually.
+                # Wait until the element count stops changing for 4 consecutive seconds
+                # before handing off to the scraper.
+                status("等待 Copilot 回答加载完成…")
+                _settle_prev = 0
+                _settle_stable = 0
+                for _si in range(40):   # up to 60 s
+                    await asyncio.sleep(1.5)
+                    try:
+                        _settle_cur = await page.evaluate(
+                            """(sels) => {
+                                for (const s of sels) {
+                                    const n = document.querySelectorAll(s).length;
+                                    if (n) return n;
+                                }
+                                return 0;
+                            }""",
+                            _TURN_SELECTORS,
+                        )
+                        if _settle_cur == _settle_prev:
+                            _settle_stable += 1
+                            if _settle_stable >= 4:   # stable for ~6 s
+                                break
+                        else:
+                            _settle_stable = 0
+                        _settle_prev = _settle_cur
+                    except Exception:
+                        break
+                status(f"对话已稳定（共约 {_settle_prev} 个消息块），开始读取…")
+
             status("正在读取对话内容（向上滚动加载全部历史）…")
-            turns = await _scrape_conversation(page)
+            try:
+                turns = await _scrape_conversation(page)
+            except Exception as exc:
+                error(f"读取对话内容时发生错误: {exc}")
+                return
             if not turns:
                 error("未能在该对话中找到任何消息。请确认链接正确、且你有权限访问该对话。")
                 return

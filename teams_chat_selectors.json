@@ -1,0 +1,31 @@
+{
+  "_comment": "CSS selectors used by teams_chat_worker.py. When Microsoft updates the Teams web UI and selectors break, update ONLY this file — no Python code changes needed. Run 'python teams_chat_worker.py diagnose' to check which selectors are still valid.",
+  "_verified": "2026-07-06",
+
+  "app_bar_wrapper":       "[data-tid=\"app-bar-wrapper\"]",
+
+  "chat_keyboard_shortcut": "Control+Shift+2",
+
+  "chat_nav_selectors": [
+    "[data-tid=\"app-bar-wrapper\"] button[aria-label*=\"Chat\" i]",
+    "button[aria-label^=\"Chat\" i]",
+    "button[aria-label*=\"Chat\" i]",
+    "[aria-label*=\"聊天\"]"
+  ],
+
+  "chat_rail":       "[data-tid=\"simple-collab-dnd-rail\"]",
+  "chat_item_role":  "treeitem",
+
+  "message":         "[data-tid=\"chat-pane-message\"]",
+  "message_author":  "[data-tid=\"message-author-name\"]",
+
+  "reaction_summary": "[data-tid=\"diverse-reaction-summary\"]",
+  "reaction_pill":    "[data-tid=\"diverse-reaction-pill-button\"]",
+  "attachment_grid":  "[data-tid=\"file-attachment-grid\"]",
+
+  "scroll_cands": [
+    "[data-tid=\"message-pane-list-viewport\"]",
+    "[data-tid=\"message-pane-list-runway\"]",
+    "[data-tid=\"message-pane-body\"]"
+  ]
+}

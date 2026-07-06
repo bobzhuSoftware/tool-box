@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import useSSEStream from './useSSEStream'
 import CookieSettings from './CookieSettings'
 
 function formatDate(iso) {
@@ -7,9 +6,11 @@ function formatDate(iso) {
   return d.toLocaleString()
 }
 
-function VideoTranscript({ token, onAuthError }) {
+function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) {
+  const tokenRef = useRef(token)
+  useEffect(() => { tokenRef.current = token }, [token])
   const authHeaders = () =>
-    token ? { Authorization: `Bearer ${token}` } : {}
+    tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {}
 
   const [inputMode, setInputMode] = useState('url')
   const [platform, setPlatform] = useState('youtube')
@@ -42,7 +43,19 @@ function VideoTranscript({ token, onAuthError }) {
   const [modelDownloadProgress, setModelDownloadProgress] = useState({}) // { modelName: { percent, message } }
   const [showFfmpegHelper, setShowFfmpegHelper] = useState(false)
   const [copiedPresetKey, setCopiedPresetKey] = useState(null)
-  const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
+  const [progressLog, setProgressLog] = useState([])
+  const [loading, setLoading] = useState(false)
+  const logContainerRef = useRef(null)
+  const pollRef = useRef(null)
+
+  useEffect(() => {
+    const el = logContainerRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    if (nearBottom) el.scrollTop = el.scrollHeight
+  }, [progressLog])
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   // FFmpeg presets for shrinking large local videos before upload.
   // {INPUT} is replaced with the selected file name (or a placeholder).
@@ -168,48 +181,104 @@ function VideoTranscript({ token, onAuthError }) {
 
   useEffect(() => { fetchHistory() }, [fetchHistory])
 
+  const startPolling = (jobId) => {
+    if (pollRef.current) clearInterval(pollRef.current)
+    const doPoll = async () => {
+      try {
+        const res = await fetch(`/api/transcribe/status/${jobId}`, { headers: authHeaders() })
+        if (!res.ok) {
+          if (res.status === 401) { onAuthError?.(); clearInterval(pollRef.current); return }
+          if (res.status === 404) { setLoading(false); clearInterval(pollRef.current); return }
+          clearInterval(pollRef.current); return
+        }
+        const job = await res.json()
+        setProgressLog(job.progress || [])
+        if (job.status === 'done') {
+          setResult(job.result)
+          setLoading(false)
+          clearInterval(pollRef.current)
+          fetchHistory()
+        } else if (job.status === 'error') {
+          setLoading(false)
+          clearInterval(pollRef.current)
+        }
+      } catch { /* ignore transient */ }
+    }
+    doPoll()
+    pollRef.current = setInterval(doPoll, 2000)
+  }
+
+  // Restore view when clicking a job in the global queue panel
+  useEffect(() => {
+    if (!initialJob) return
+    if (pollRef.current) clearInterval(pollRef.current)
+    setResult(null)
+    setProgressLog(initialJob.last_message
+      ? [{ type: initialJob.status === 'error' ? 'error' : 'status', message: initialJob.last_message }]
+      : [])
+    if (initialJob.status === 'done') {
+      setLoading(false)
+      fetch(`/api/transcribe/status/${initialJob.job_id}`, { headers: authHeaders() })
+        .then(r => r.ok ? r.json() : null)
+        .then(job => {
+          if (job?.progress?.length) setProgressLog(job.progress)
+          if (job?.result) { setResult(job.result); fetchHistory() }
+        }).catch(() => {})
+    } else if (initialJob.status === 'running') {
+      setLoading(true)
+      startPolling(initialJob.job_id)
+    } else {
+      setLoading(false)
+      fetch(`/api/transcribe/status/${initialJob.job_id}`, { headers: authHeaders() })
+        .then(r => r.ok ? r.json() : null)
+        .then(job => { if (job?.progress?.length) setProgressLog(job.progress) })
+        .catch(() => {})
+    }
+    onClearInitialJob?.()
+  }, [initialJob]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleTranscribe = async () => {
     if (inputMode === 'url' && !url.trim()) return
     if (inputMode === 'upload' && !uploadFile) return
+    if (pollRef.current) clearInterval(pollRef.current)
     setResult(null)
-
-    const fetchFn = () => {
+    setProgressLog([])
+    setLoading(true)
+    try {
+      let res
       if (inputMode === 'upload') {
         const formData = new FormData()
         formData.append('file', uploadFile)
         formData.append('model', model)
         formData.append('language', language.trim())
-        return fetch('/api/transcribe/upload', {
+        res = await fetch('/api/transcribe/enqueue-upload', {
           method: 'POST',
-          headers: { ...authHeaders() },
+          headers: authHeaders(),
           body: formData,
         })
       } else {
         const body = { url: url.trim(), model, mode: transcribeMode }
         if (language.trim()) body.language = language.trim()
-        return fetch('/api/transcribe/stream', {
+        res = await fetch('/api/transcribe/enqueue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify(body),
         })
       }
+      if (!res.ok) {
+        if (res.status === 401) { onAuthError?.(); setLoading(false); return }
+        const data = await res.json().catch(() => ({}))
+        setProgressLog([{ type: 'error', message: data.detail || `Server error (${res.status})` }])
+        setLoading(false)
+        return
+      }
+      const { job_id } = await res.json()
+      setProgressLog([{ type: 'status', message: '任务已提交，后台处理中…可切换到其他工具，完成后从右下角任务面板跳回查看。' }])
+      startPolling(job_id)
+    } catch (err) {
+      setProgressLog([{ type: 'error', message: err.message || 'Something went wrong' }])
+      setLoading(false)
     }
-
-    await streamSSE(fetchFn, {
-      onAuthError,
-      onEvent: (event) => {
-        if (event.type === 'done') {
-          setResult(event)
-          const doneMsg = event.source === 'captions'
-            ? `Extracted from existing captions! Detected language: ${event.language}`
-            : `Transcription complete! Detected language: ${event.language}`
-          addLog({ type: 'done', message: doneMsg })
-          fetchHistory()
-        } else {
-          addLog(event)
-        }
-      },
-    })
   }
 
   const handleDownload = async (jobId, withTimestamps, chunkMinutes = 0) => {
