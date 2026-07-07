@@ -109,6 +109,14 @@ function HomePage({ onSelectTool }) {
         '给定一个字符串和一个文件夹路径，查找它在该路径（含子文件夹）下所有 Excel 各 sheet 中出现的位置（文件名 / sheet / 单元格）。',
       tags: ['Excel', 'openpyxl', '脚本', '查找'],
     },
+    {
+      id: 'sessionreader',
+      icon: '📖',
+      title: 'Copilot 会话阅读器',
+      description:
+        '把 VS Code Copilot 的 JSONL 聊天记录解析成清晰易读的对话界面：区分用户/助手气泡、可折叠的思考过程与工具调用，支持搜索与导出 Markdown。',
+      tags: ['Copilot', '聊天记录', '阅读', 'Markdown'],
+    },
   ]
 
   // 分区定义：现有功能归入「工具」，脚本类工具放入「脚本工具」。

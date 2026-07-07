@@ -19,6 +19,7 @@ import ThreadsDownload from './ThreadsDownload'
 import AudioRecorder from './AudioRecorder'
 import ScreenRecorder from './ScreenRecorder'
 import ExcelSearch from './ExcelSearch'
+import SessionReader from './SessionReader'
 
 
 function App() {
@@ -208,6 +209,7 @@ function App() {
       {currentTool === 'audio' && (<AudioRecorder token={token} onAuthError={handleLogout} />)}
       {currentTool === 'screen' && (<ScreenRecorder token={token} onAuthError={handleLogout} />)}
       {currentTool === 'excelsearch' && (<ExcelSearch token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'sessionreader' && (<SessionReader token={token} onAuthError={handleLogout} />)}
 
       <GlobalQueue
         jobs={allJobs}
