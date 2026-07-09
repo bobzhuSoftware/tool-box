@@ -48,13 +48,15 @@ This single command does three things automatically:
 
 ---
 
-### Step 3 — Install Playwright browser (for web export features)
+### Step 3 — Install Playwright browsers (for web export features)
 
 ```powershell
-.venv\Scripts\python.exe -m playwright install chromium
+.venv\Scripts\python.exe -m playwright install chromium firefox
 ```
 
 This is required for Discord, WeChat, Teams, and web-to-PDF export features. You can skip this step if you only need video transcription.
+
+> **Note:** Both Chromium and Firefox are needed. Chromium is used for most web exports; Firefox is used for PDF conversion (it copies your Firefox session profile to preserve login state).
 
 ---
 
@@ -96,6 +98,7 @@ If you need the Book Converter feature (EPUB → PDF):
 | Port 8000 or 5173 already in use | `start-dev.cmd` detects this automatically and picks the next free port |
 | Whisper model download is slow | The model is downloaded once on first transcription; subsequent runs use the local cache |
 | YouTube "Sign in to confirm" error | Export `cookies.txt` from your browser and place it in the project root — see README for details |
+| PDF conversion fails with "Please run `playwright install`" | Playwright browsers are outdated. Run `.venv\Scripts\python.exe -m playwright install firefox` to update. |
 
 ---
 
@@ -147,10 +150,12 @@ npm run setup
 ### 第三步 — 安装 Playwright 浏览器（用于网页导出功能）
 
 ```powershell
-.venv\Scripts\python.exe -m playwright install chromium
+.venv\Scripts\python.exe -m playwright install chromium firefox
 ```
 
 Discord 聊天记录导出、微信导出、Teams 导出、网页转 PDF 等功能依赖此步骤。如果只使用视频转录功能，可以跳过。
+
+> **说明：** Chromium 和 Firefox 均需安装。Chromium 用于大多数网页导出；Firefox 用于 PDF 转换（会复制你的 Firefox 登录会话以保持登录状态）。
 
 ---
 
@@ -192,3 +197,4 @@ npm run dev
 | 端口 8000 或 5173 被占用 | `start-dev.cmd` 会自动检测并切换到下一个可用端口 |
 | Whisper 模型下载很慢 | 模型在首次转录时自动下载，之后使用本地缓存，无需重复下载 |
 | YouTube 提示"请登录确认你不是机器人" | 将浏览器导出的 `cookies.txt` 文件放到项目根目录，详见 README |
+| PDF 转换报错"Please run `playwright install`" | Playwright 浏览器版本过旧，运行 `.venv\Scripts\python.exe -m playwright install firefox` 更新。 |

@@ -965,6 +965,20 @@ def main():
             except Exception:
                 x_dom_article_html = ''
 
+            # [调试] 提取诊断：便于对比不同机器上为何正文被截断。
+            try:
+                _has_title_el = bool(page.evaluate(
+                    "() => !!document.querySelector('[data-testid=\"twitter-article-title\"]')"
+                ))
+            except Exception:
+                _has_title_el = False
+            _strip_dbg = _re2.compile(r'<[^>]+>')
+            status(
+                f"[调试] 文章标题元素命中={_has_title_el}; "
+                f"DOM直取正文={len(_strip_dbg.sub('', x_dom_article_html))}字; "
+                f"raw_html={len(raw_html)}字节"
+            )
+
             url_to_data: dict = {}
 
             status(f"Downloading {len(image_items)} image(s)...")
@@ -1022,6 +1036,10 @@ def main():
                 if dom_len > read_len * 1.3:
                     status(f"DOM extraction ({dom_len} chars) > Readability ({read_len} chars) — using DOM version.")
                     article_html = x_dom_article_html
+                else:
+                    status(f"[调试] 采用 Readability 版本：DOM直取={dom_len}字, Readability={read_len}字")
+            else:
+                status("[调试] DOM直取为空，只能使用 Readability 结果（最易截断）")
 
             article_html = _re2.sub(r'<script[^>]*>.*?</script>', '', article_html,
                                     flags=_re2.DOTALL | _re2.IGNORECASE)

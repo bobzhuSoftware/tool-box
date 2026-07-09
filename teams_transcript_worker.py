@@ -101,6 +101,75 @@ def clean_vtt(vtt_text: str) -> str:
     return "\n".join(result_lines) + "\n"
 
 
+def _normalize_offset(value) -> str:
+    """Normalise a Stream transcript offset into a VTT timestamp HH:MM:SS.mmm.
+
+    Stream entries use .NET-style strings ("0:00:05.1234567") or plain seconds.
+    VTT requires HH:MM:SS.mmm (millisecond precision, zero-padded).
+    """
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s:
+        return ""
+    # Numeric seconds (int/float)
+    try:
+        total = float(s)
+        hh = int(total // 3600)
+        mm = int((total % 3600) // 60)
+        ss = int(total % 60)
+        ms = int(round((total - int(total)) * 1000))
+        return f"{hh:02d}:{mm:02d}:{ss:02d}.{ms:03d}"
+    except ValueError:
+        pass
+    # String form: [H]H:MM:SS[.fffffff]
+    m = re.match(r'^(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?$', s)
+    if not m:
+        return s  # leave as-is; better than dropping the cue
+    hh, mm, ss, frac = m.group(1), m.group(2), m.group(3), m.group(4) or "0"
+    ms = int(round(float("0." + frac) * 1000))
+    return f"{int(hh):02d}:{int(mm):02d}:{int(ss):02d}.{ms:03d}"
+
+
+def stream_json_to_vtt(raw: str) -> str:
+    """Convert a Microsoft Stream JSON transcript into clean WebVTT.
+
+    Newer SharePoint Stream recordings expose the transcript as JSON
+    (displayName ends in .json) instead of WebVTT. The shape is:
+        { "entries": [ { "text": "...", "startOffset": "...",
+                         "endOffset": "...", "speakerDisplayName": "..." }, ... ] }
+    """
+    # Stream serves the JSON with a UTF-8 BOM (\ufeff), which json.loads rejects.
+    raw = raw.lstrip("\ufeff")
+    data = json.loads(raw)
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        # Some variants nest it or use a different key — try common fallbacks.
+        for key in ("transcript", "value", "results"):
+            v = data.get(key)
+            if isinstance(v, list):
+                entries = v
+                break
+    if not isinstance(entries, list):
+        entries = []
+
+    result_lines = ["WEBVTT", ""]
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        start = _normalize_offset(e.get("startOffset") or e.get("start"))
+        end = _normalize_offset(e.get("endOffset") or e.get("end"))
+        text = (e.get("text") or e.get("displayText") or "").strip()
+        speaker = (e.get("speakerDisplayName") or e.get("speaker") or "").strip()
+        if not (start and end and text):
+            continue
+        result_lines.append(f"{start} --> {end}")
+        result_lines.append(f"{speaker}: {text}" if speaker else text)
+        result_lines.append("")
+
+    return "\n".join(result_lines) + "\n"
+
+
 def mp4_url_to_stream_url(mp4_url: str) -> str:
     parsed = urlparse(mp4_url)
     path = parsed.path
@@ -596,8 +665,21 @@ async def run(url: str, output_path: str):
                 # while still using the browser session's cookies when needed.
                 api_response = await ctx.request.get(download_url)
                 http_status = api_response.status
-                vtt_text = await api_response.text()
-                size_bytes = len(vtt_text)
+                # Read RAW bytes, not .text(): Playwright's .text() guesses the
+                # charset from headers and can mis-decode (e.g. UTF-8-with-BOM or
+                # UTF-16), leaving a stray BOM / mojibake that breaks json.loads.
+                raw_bytes = await api_response.body()
+                size_bytes = len(raw_bytes)
+                # utf-8-sig transparently strips a UTF-8 BOM; fall back to UTF-16
+                # (which SharePoint occasionally uses) then a lossy UTF-8 decode.
+                for _enc in ("utf-8-sig", "utf-16", "utf-8"):
+                    try:
+                        vtt_text = raw_bytes.decode(_enc)
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                else:
+                    vtt_text = raw_bytes.decode("utf-8", errors="replace")
             except Exception as e:
                 print(f"ERROR:Download failed: {e}", flush=True)
                 await ctx.close()
@@ -608,9 +690,45 @@ async def run(url: str, output_path: str):
                 await ctx.close()
                 return
 
-            # Clean UUID cue identifiers
-            cleaned = clean_vtt(vtt_text)
-            status(f"Cleaned VTT ({size_bytes // 1024} KB)")
+            # The transcript may arrive as WebVTT or as a Microsoft Stream JSON
+            # transcript. Decide purely from the actual content — the metadata
+            # displayName is unreliable (it often ends in ".json" even when the
+            # download is plain WebVTT), so trusting it would trigger a bogus
+            # "JSON parse failed" fallback on every VTT recording.
+            _stripped = vtt_text.lstrip("\ufeff \t\r\n")
+            _looks_json = _stripped.startswith("{") or _stripped.startswith("[")
+            if _looks_json:
+                try:
+                    cleaned = stream_json_to_vtt(vtt_text)
+                except Exception as e:
+                    # Not actually JSON (or an unexpected shape) — fall back to VTT.
+                    status(f"JSON parse failed ({str(e)[:60]}), treating as VTT")
+                    cleaned = clean_vtt(vtt_text)
+            else:
+                cleaned = clean_vtt(vtt_text)
+
+            cleaned_kb = len(cleaned.encode("utf-8")) // 1024
+            status(f"Cleaned transcript ({cleaned_kb} KB from {size_bytes // 1024} KB raw)")
+
+            # Guard against writing an empty stub: if conversion produced no cues,
+            # fail loudly instead of saving a misleading ~1 KB file. Dump the raw
+            # download next to the output so its true format can be inspected.
+            if "-->" not in cleaned:
+                try:
+                    debug_path = output_path + ".raw"
+                    with open(debug_path, "wb") as _df:
+                        _df.write(raw_bytes)
+                except Exception:
+                    debug_path = "(could not write debug file)"
+                _head = vtt_text[:120].replace("\n", "\\n").replace("\r", "\\r")
+                status(f"Debug: raw saved to {debug_path}")
+                status(f"Debug: first 120 chars → {_head!r}")
+                print("ERROR:字幕内容解析为空 — 下载的格式未能识别（既不是有效的 WebVTT，"
+                      "也不是可识别的 Stream JSON transcript）。原始文件已保存到 "
+                      f"{debug_path}，请把它发给我以便适配其格式。",
+                      flush=True)
+                await ctx.close()
+                return
 
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(cleaned)
