@@ -311,9 +311,8 @@ async def run(url: str, output_path: str):
                 low = (txt or "").lower()
                 phrases = (
                     "you don't have access", "you do not have access",
-                    "request access", "don't have permission",
-                    "do not have permission", "需要访问权限", "没有访问权限",
-                    "无权访问", "请求访问权限",
+                    "don't have permission", "do not have permission",
+                    "需要访问权限", "没有访问权限", "无权访问",
                 )
                 return any(p in low for p in phrases)
 
@@ -487,12 +486,28 @@ async def run(url: str, output_path: str):
             # yet show an in-page "You don't have access" notice when the signed-in
             # account lacks permission. Detect that now and fail with a clear,
             # actionable message instead of the misleading "no transcript found".
+            #
+            # In the fast silent (already-signed-in) path the player is detected
+            # before the main content finishes rendering, so a single snapshot can
+            # transiently look like a no-access notice. Re-confirm a few times and
+            # only fail if the notice PERSISTS and no transcript metadata arrives
+            # (a genuine access-denied card stays; a loading state clears).
             if not transcript_meta and await _no_access_in_page(page):
-                print("ERROR:无权限访问该录制 — 当前 Edge profile 登录的账号没有此录制的访问权限。"
-                      "请在设置中选择能打开该录制的 Edge profile（账号），或向录制所有者申请访问权限。",
-                      flush=True)
-                await ctx.close()
-                return
+                _denied = True
+                for _ in range(4):          # ~12 s of grace
+                    await asyncio.sleep(3)
+                    if transcript_meta:
+                        _denied = False
+                        break
+                    if not await _no_access_in_page(page):
+                        _denied = False
+                        break
+                if _denied:
+                    print("ERROR:无权限访问该录制 — 当前 Edge profile 登录的账号没有此录制的访问权限。"
+                          "请在设置中选择能打开该录制的 Edge profile（账号），或向录制所有者申请访问权限。",
+                          flush=True)
+                    await ctx.close()
+                    return
 
             # Try various selectors that SharePoint Stream uses for transcript buttons
             transcript_selectors = [
