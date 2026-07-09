@@ -119,7 +119,12 @@ async def _open_teams(p):
     async def _launch(headless: bool):
         # Edge's legacy --headless crashes persistent contexts, so request the
         # modern headless engine via an arg and keep Playwright's flag off.
-        args = ["--no-first-run", "--no-default-browser-check"]
+        # --profile-directory=Default forces Edge into the automation profile's
+        # Default dir — the SAME dir the transcript worker signs into — so the
+        # session is actually shared. Without it Edge may open a different
+        # profile sub-dir and fail to reuse the transcript worker's login,
+        # forcing a redundant sign-in (and it also bypasses the profile chooser).
+        args = ["--no-first-run", "--no-default-browser-check", "--profile-directory=Default"]
         if headless:
             args.append("--headless=new")
         c = await p.chromium.launch_persistent_context(
@@ -190,7 +195,7 @@ async def _open_teams(p):
         pass
     status("需要登录：正在打开 Edge 窗口，请在该窗口登录 Teams（之后会自动记住）…")
     ctx, page = await _launch(headless=False)
-    state = await _wait_ready(page, 180)
+    state = await _wait_ready(page, 300)
     if state == "ok":
         status("登录成功，继续…")
         return ctx, page, True
