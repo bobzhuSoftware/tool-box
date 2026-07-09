@@ -658,6 +658,7 @@ def download_audio(video_url: str, output_dir: str, user_id: str | None = None) 
         ],
         "outtmpl": output_template,
         "quiet": True,
+        "nocheckcertificate": True,
     }
     if FFMPEG_LOCATION:
         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
@@ -788,7 +789,7 @@ def _extract_captions(
     # ------------------------------------------------------------------
     q.put({"type": "status", "message": "Checking for available captions..."})
 
-    info_opts: dict = {"quiet": True, "skip_download": True}
+    info_opts: dict = {"quiet": True, "skip_download": True, "nocheckcertificate": True}
     _apply_cookies(info_opts, user_id)
     with yt_dlp.YoutubeDL(info_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -854,6 +855,7 @@ def _extract_captions(
         "subtitleslangs": [chosen_lang],
         "subtitlesformat": "vtt",
         "outtmpl": os.path.join(tmp_dir, "sub.%(ext)s"),
+        "nocheckcertificate": True,
     }
     _apply_cookies(dl_opts, user_id)
     with yt_dlp.YoutubeDL(dl_opts) as ydl:
@@ -1130,6 +1132,7 @@ async def transcribe_stream(req: TranscribeRequest, user: User = Depends(require
                         "outtmpl": output_template,
                         "quiet": True,
                         "progress_hooks": [progress_hook],
+                        "nocheckcertificate": True,
                     }
                     if FFMPEG_LOCATION:
                         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
@@ -1438,6 +1441,7 @@ def _transcript_run_url_job(
                     "outtmpl": output_template,
                     "quiet": True,
                     "progress_hooks": [progress_hook],
+                    "nocheckcertificate": True,
                 }
                 if FFMPEG_LOCATION:
                     ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
