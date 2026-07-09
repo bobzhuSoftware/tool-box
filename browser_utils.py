@@ -326,9 +326,30 @@ def ensure_automation_profile(profile: str | None = None, domain_hint: str = "")
         if os.path.isfile(src):
             _robust_copy(src, os.path.join(dst_profile, fname))
 
+    # Copy the root Local State (it carries the cookie-encryption key and marks
+    # first-run as done). Strip the multi-profile info_cache and the
+    # "show profile picker on startup" flags first: seeding the real profile's
+    # Local State verbatim makes the automation Edge pop a profile *chooser*
+    # window on launch. If the user picks a profile there, Edge opens a separate
+    # window Playwright is not attached to, so the sign-in never registers and
+    # the worker times out. (--profile-directory=Default in the worker already
+    # bypasses the picker; this is defense-in-depth.)
     local_state_src = os.path.join(user_data, "Local State")
     if os.path.isfile(local_state_src):
-        _robust_copy(local_state_src, os.path.join(auto, "Local State"))
+        dst_local_state = os.path.join(auto, "Local State")
+        try:
+            with open(local_state_src, encoding="utf-8") as f:
+                state = json.load(f)
+            profile_info = state.setdefault("profile", {})
+            profile_info["info_cache"] = {}
+            profile_info.pop("last_used", None)
+            profile_info.pop("profiles_order", None)
+            profile_info["show_profile_picker_on_startup"] = False
+            state.setdefault("browser", {})["show_profile_picker_on_startup"] = False
+            with open(dst_local_state, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except (OSError, ValueError):
+            _robust_copy(local_state_src, dst_local_state)
 
     return auto
 

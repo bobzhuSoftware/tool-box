@@ -361,7 +361,18 @@ async def run(url: str, output_path: str):
                 # Edge's legacy --headless mode crashes persistent contexts
                 # ("Browser window not found"), so request the modern headless
                 # engine via an arg and keep Playwright's own flag off.
-                args = ["--no-first-run", "--no-default-browser-check"]
+                # --profile-directory=Default forces Edge straight into the
+                # automation profile's Default dir and bypasses the profile
+                # *chooser* window. Without it, a seeded Local State that lists
+                # multiple real profiles makes Edge pop a picker; selecting a
+                # profile there opens a separate window Playwright isn't
+                # attached to, so sign-in never registers and the worker times
+                # out with "Authentication required".
+                args = [
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--profile-directory=Default",
+                ]
                 if headless:
                     args.append("--headless=new")
                 c = await p.chromium.launch_persistent_context(
