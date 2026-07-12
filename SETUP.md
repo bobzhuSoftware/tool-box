@@ -24,6 +24,38 @@ The following tools must be installed **system-wide** before running the project
 
 ---
 
+### Verify prerequisites
+
+Before continuing, open a **new** terminal and run these commands. Each should print a version number:
+
+```powershell
+git --version
+python --version
+node --version
+npm --version
+ffmpeg -version
+```
+
+Expected output looks like:
+
+```
+git version 2.x.x
+Python 3.10.x   (or higher)
+v18.x.x         (or higher)
+10.x.x
+ffmpeg version 6.x ...
+```
+
+If any command reports **"not recognized"** or **"command not found"**, that tool is either not installed or not on your `PATH`. Re-install it (see the table above), open a **new** terminal, and try again.
+
+> One-line check (PowerShell) — verifies all four at once:
+>
+> ```powershell
+> git --version; python --version; node --version; ffmpeg -version
+> ```
+
+---
+
 ### Step 1 — Clone the repository
 
 ```powershell
@@ -120,6 +152,38 @@ If you need the Book Converter feature (EPUB → PDF):
 > **注意事项：**
 > - 安装 Python 时，务必勾选 **"Add Python to PATH"**。
 > - 安装 FFmpeg 后，打开一个新终端窗口，运行 `ffmpeg -version` 验证是否生效。用 `winget` 安装后需要重新打开终端。
+
+---
+
+### 验证前置环境
+
+继续之前，请打开一个**新的**终端，运行以下命令。每条命令都应输出版本号：
+
+```powershell
+git --version
+python --version
+node --version
+npm --version
+ffmpeg -version
+```
+
+正常输出类似：
+
+```
+git version 2.x.x
+Python 3.10.x   （或更高）
+v18.x.x         （或更高）
+10.x.x
+ffmpeg version 6.x ...
+```
+
+如果某条命令提示 **"不是内部或外部命令"** 或 **"command not found"**，说明该工具未安装或未加入 `PATH`。请参照上方表格重新安装，**重开终端**后再试。
+
+> 一行命令（PowerShell）快速检查全部：
+>
+> ```powershell
+> git --version; python --version; node --version; ffmpeg -version
+> ```
 
 ---
 

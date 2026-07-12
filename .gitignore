@@ -25,3 +25,12 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets — never commit
+cookies.txt
+.env
+*.env
+
+# Stray/scratch files
+txt
+

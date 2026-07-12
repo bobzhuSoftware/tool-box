@@ -37,6 +37,7 @@ RUN playwright install --with-deps chromium
 
 # Copy backend source
 COPY server.py transcribe.py pdf_worker.py book_converter_worker.py ./
+COPY app ./app
 
 # Copy compiled frontend from Stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
