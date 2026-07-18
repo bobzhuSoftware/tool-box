@@ -1024,6 +1024,41 @@
   background: #f0f0ff;
 }
 
+.split-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.split-input {
+  width: 56px;
+  padding: 6px 8px;
+  font-size: 0.95rem;
+  text-align: center;
+  color: #333;
+  border: 1px solid #c7c9d1;
+  border-radius: 8px;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.split-input:focus {
+  outline: none;
+  border-color: #646cff;
+  box-shadow: 0 0 0 3px rgba(100, 108, 255, 0.2);
+}
+
+.split-input::-webkit-inner-spin-button,
+.split-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.split-unit {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}
+
 .btn-sm {
   padding: 0.35rem 0.75rem;
   border-radius: 6px;

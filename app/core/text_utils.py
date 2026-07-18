@@ -87,6 +87,244 @@ def _parse_vtt(content: str) -> list[dict]:
     return segments
 
 
+_SRT_TS_RE = re.compile(
+    r'(\d{1,2}:\d{2}:\d{2}[.,]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[.,]\d{1,3})'
+)
+
+
+def _parse_srt(content: str) -> list[dict]:
+    """
+    Parse a SubRip (.srt) subtitle file into Whisper-compatible segment dicts.
+
+    Returns: [{"start": float, "end": float, "text": str}, ...]
+
+    Blocks are separated by blank lines. Each block is: an optional numeric
+    index line, a ``HH:MM:SS,mmm --> HH:MM:SS,mmm`` timing line, then one or
+    more text lines. HTML tags are stripped.
+    """
+    def ts_to_sec(ts: str) -> float:
+        ts = ts.replace(',', '.')
+        h, m, s = ts.split(':')
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    segments: list[dict] = []
+    blocks = re.split(r'\n\s*\n', content.replace('\r\n', '\n').replace('\r', '\n'))
+    for block in blocks:
+        lines = [ln for ln in block.split('\n') if ln.strip() != '']
+        if not lines:
+            continue
+        # Locate the timing line (usually line 0 or 1).
+        ts_idx = None
+        ts_match = None
+        for idx, ln in enumerate(lines):
+            m = _SRT_TS_RE.search(ln)
+            if m:
+                ts_idx, ts_match = idx, m
+                break
+        if ts_match is None:
+            continue
+        text = re.sub(r'<[^>]+>', '', ' '.join(lines[ts_idx + 1:])).strip()
+        if not text:
+            continue
+        segments.append({
+            "start": ts_to_sec(ts_match.group(1)),
+            "end": ts_to_sec(ts_match.group(2)),
+            "text": text,
+        })
+
+    return segments
+
+
+def _parse_plaintext(content: str) -> list[dict]:
+    """
+    Turn a plain-text file into pseudo-segments (no real timing).
+
+    Paragraphs are separated by blank lines; if there is only one block the
+    whole file becomes a single segment. All timestamps are 0 because plain
+    text carries no timing information.
+    """
+    blocks = [b.strip() for b in re.split(r'\n\s*\n', content) if b.strip()]
+    if not blocks:
+        stripped = content.strip()
+        blocks = [stripped] if stripped else []
+    return [{"start": 0.0, "end": 0.0, "text": b} for b in blocks]
+
+
+def parse_subtitle(content: str, ext: str) -> list[dict]:
+    """
+    Dispatch subtitle parsing by file extension.
+
+    Supported: ``.vtt`` (WebVTT), ``.srt`` (SubRip), ``.txt`` (plain text).
+    Unknown extensions fall back to plain-text handling.
+
+    Returns raw segment dicts with float ``start``/``end`` seconds — feed the
+    result through ``merge_segments`` to get display-ready chunks.
+    """
+    ext = (ext or "").lower()
+    if ext == ".vtt":
+        return _parse_vtt(content)
+    if ext == ".srt":
+        return _parse_srt(content)
+    return _parse_plaintext(content)
+
+
+# ---------------------------------------------------------------------------
+# Teams / speaker-aware WebVTT handling
+# ---------------------------------------------------------------------------
+# Microsoft Teams meeting transcripts are WebVTT files that carry the speaker
+# inside a ``<v Speaker Name>...</v>`` voice tag and use UUID cue identifiers.
+_VTT_VOICE_OPEN_RE = re.compile(r'<v\s+([^>]*)>', re.IGNORECASE)
+_VTT_CUE_ID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/\d+-\d+\s*$',
+    re.IGNORECASE,
+)
+_VTT_CUE_TS_RE = re.compile(
+    r'(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})\s*-->\s*'
+    r'(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})'
+)
+
+
+def _parse_vtt_with_speakers(content: str) -> list[dict]:
+    """Parse a Teams-style WebVTT (with ``<v Speaker>`` tags) line-by-line.
+
+    Each cue is returned as a separate raw segment carrying the speaker name
+    verbatim (including any org suffix) in a dedicated ``speaker`` field; the
+    ``text`` field holds only the utterance. Returns raw segment dicts with
+    float ``start``/``end`` seconds — feed them through
+    ``_merge_speaker_segments`` to combine consecutive same-speaker cues.
+    """
+    lines = content.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+    segments: list[dict] = []
+    i, n = 0, len(lines)
+
+    while i < n:
+        line = lines[i]
+        m = _VTT_CUE_TS_RE.search(line)
+        if not m:
+            i += 1
+            continue
+        start = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) + int(m.group(4).ljust(3, '0')) / 1000
+        end = int(m.group(5)) * 3600 + int(m.group(6)) * 60 + int(m.group(7)) + int(m.group(8).ljust(3, '0')) / 1000
+        i += 1
+
+        # Collect the cue's text lines (stop at a blank line, the next cue id,
+        # or the next timestamp line).
+        parts: list[str] = []
+        while i < n:
+            t = lines[i].strip()
+            if not t:
+                i += 1
+                break
+            if '-->' in t or _VTT_CUE_ID_RE.match(t):
+                break
+            parts.append(t)
+            i += 1
+
+        block = ' '.join(parts).strip()
+        if not block:
+            continue
+
+        voice = _VTT_VOICE_OPEN_RE.search(block)
+        speaker = voice.group(1).strip() if voice else ''
+        body = re.sub(r'<[^>]+>', '', block).strip()
+        if not body:
+            continue
+        segments.append({"start": start, "end": end, "speaker": speaker, "text": body})
+
+    return segments
+
+
+def _merge_speaker_segments(
+    raw_segments: list[dict],
+    min_words: int = 40,
+    max_words: int = 60,
+) -> list[dict]:
+    """Merge cues into longer chunks by word count, with inline speaker labels.
+
+    Cues are ordered by start time, then packed purely by word count (like a
+    normal transcript) so time spans are long and uniform regardless of how
+    often the speaker changes. Within a chunk a ``Speaker:`` label is inserted
+    only when the speaker changes (always for the chunk's first utterance). A
+    speaker's turn may span a chunk boundary — the reader sees it continues from
+    the last-named speaker. Returns dicts with float ``start``/``end`` seconds.
+
+    Flushes when the word count reaches ``min_words`` at a sentence boundary, or
+    unconditionally at ``max_words``.
+    """
+    SENTENCE_END = re.compile(r'[.?!。？！…]+["\')\]]?\s*$')
+
+    ordered = sorted(raw_segments, key=lambda s: s["start"])
+
+    merged: list[dict] = []
+    buf: list[dict] = []
+    buf_words = 0
+
+    def render(cues: list[dict]) -> str:
+        parts: list[str] = []
+        prev_speaker: str | None = None
+        for c in cues:
+            sp = c.get("speaker", "")
+            body = c["text"].strip()
+            parts.append(f"{sp}: {body}" if sp and sp != prev_speaker else body)
+            prev_speaker = sp
+        return " ".join(parts).strip()
+
+    def flush():
+        nonlocal buf, buf_words
+        if not buf:
+            return
+        merged.append({
+            "start": buf[0]["start"],
+            "end": buf[-1]["end"],
+            "text": render(buf),
+        })
+        buf = []
+        buf_words = 0
+
+    for seg in ordered:
+        buf.append(seg)
+        buf_words += _count_words(seg["text"])
+        at_boundary = bool(SENTENCE_END.search(seg["text"].strip()))
+        if (buf_words >= min_words and at_boundary) or buf_words >= max_words:
+            flush()
+
+    flush()
+    return merged
+
+
+def build_subtitle_segments(content: str, ext: str) -> tuple[list[dict], str]:
+    """Turn an uploaded subtitle file into display-ready segments.
+
+    Returns ``(segments, full_text)`` where each segment carries string
+    ``HH:MM:SS`` ``start``/``end`` timestamps.
+
+    Teams-style WebVTT (containing ``<v Speaker>`` voice tags) is handled with a
+    speaker-aware parser: cues are packed into ~40-60 word chunks (long, uniform
+    time spans like a normal transcript) with an inline ``Speaker:`` label
+    inserted whenever the speaker changes. Every other subtitle is parsed and
+    then merged into ~40-60 word chunks.
+    """
+    ext = (ext or "").lower()
+    if ext == ".vtt" and _VTT_VOICE_OPEN_RE.search(content):
+        raw = _parse_vtt_with_speakers(content)
+        merged = _merge_speaker_segments(raw)
+        segments = [
+            {
+                "start": format_timestamp(s["start"]),
+                "end": format_timestamp(s["end"]),
+                "text": s["text"],
+            }
+            for s in merged
+        ]
+        full_text = "\n".join(s["text"] for s in merged)
+        return segments, full_text
+
+    raw = parse_subtitle(content, ext)
+    segments = merge_segments(raw)
+    full_text = " ".join(s["text"].strip() for s in raw)
+    return segments, full_text
+
+
 def merge_segments(
     raw_segments: list[dict],
     min_words: int = 40,

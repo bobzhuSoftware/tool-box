@@ -20,6 +20,7 @@ import AudioRecorder from './AudioRecorder'
 import ScreenRecorder from './ScreenRecorder'
 import ExcelSearch from './ExcelSearch'
 import SessionReader from './SessionReader'
+import SubtitleProcessor from './SubtitleProcessor'
 
 
 function App() {
@@ -210,6 +211,7 @@ function App() {
       {currentTool === 'screen' && (<ScreenRecorder token={token} onAuthError={handleLogout} />)}
       {currentTool === 'excelsearch' && (<ExcelSearch token={token} onAuthError={handleLogout} />)}
       {currentTool === 'sessionreader' && (<SessionReader token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'subtitle' && (<SubtitleProcessor token={token} onAuthError={handleLogout} />)}
 
       <GlobalQueue
         jobs={allJobs}

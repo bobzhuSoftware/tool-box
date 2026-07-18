@@ -20,6 +20,7 @@ from app.routers.pdf import router as pdf_router
 from app.routers.profiles import router as profiles_router
 from app.routers.screen import router as screen_router
 from app.routers.sessions import router as sessions_router
+from app.routers.subtitle import router as subtitle_router
 from app.routers.teams_chat import router as teams_chat_router
 from app.routers.teams_transcript import router as teams_transcript_router
 from app.routers.threads import router as threads_router
@@ -43,6 +44,7 @@ app.include_router(pdf_router)
 app.include_router(profiles_router)
 app.include_router(screen_router)
 app.include_router(sessions_router)
+app.include_router(subtitle_router)
 app.include_router(teams_chat_router)
 app.include_router(teams_transcript_router)
 app.include_router(threads_router)

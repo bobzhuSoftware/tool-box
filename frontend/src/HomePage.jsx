@@ -13,6 +13,14 @@ function HomePage({ onSelectTool }) {
       tags: ['YouTube', 'Bilibili', 'Whisper AI'],
     },
     {
+      id: 'subtitle',
+      icon: '📝',
+      title: '字幕处理',
+      description:
+        '上传已有的字幕文件（VTT / SRT / TXT），转换为纯文本、带时间戳文本，或按分钟拆分的多文件 ZIP 下载。',
+      tags: ['VTT', 'SRT', '字幕', 'TXT'],
+    },
+    {
       id: 'webtopdf',
       icon: '🌐',
       title: 'Web → PDF（智能提取正文）',
