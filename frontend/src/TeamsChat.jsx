@@ -21,6 +21,37 @@ function TeamsChat({ token, onAuthError }) {
 
   const authHeaders = () => token ? { Authorization: `Bearer ${token}` } : {}
 
+  // 时间范围：日期 + 小时 + 15 分档。内部存储 'YYYY-MM-DDTHH:mm'（mm ∈ 00/15/30/45）
+  const HOURS = Array.from({ length: 24 }, (_, h) => String(h).padStart(2, '0'))
+  const MINUTES = ['00', '15', '30', '45']
+  const parseParts = (v) => v
+    ? { date: v.slice(0, 10), hour: v.slice(11, 13) || '00', minute: v.slice(14, 16) || '00' }
+    : { date: '', hour: '00', minute: '00' }
+  const buildValue = (date, hour, minute) => date ? `${date}T${hour}:${minute}` : ''
+  const sp = parseParts(startDate)
+  const ep = parseParts(endDate)
+  const sameDay = sp.date && ep.date && sp.date === ep.date
+  const setStart = (parts) => {
+    let v = buildValue(parts.date, parts.hour, parts.minute)
+    if (v && endDate && v > endDate) v = endDate  // 起始不得晚于结束
+    setStartDate(v)
+  }
+  const setEnd = (parts) => {
+    let v = buildValue(parts.date, parts.hour, parts.minute)
+    if (v && startDate && v < startDate) v = startDate  // 结束不得早于起始
+    setEndDate(v)
+  }
+  const ctrlStyle = {
+    height: '34px',
+    padding: '0 0.5rem',
+    borderRadius: '7px',
+    border: '1px solid var(--border-color, #d5dae2)',
+    background: 'var(--input-bg, #fff)',
+    color: 'inherit',
+    fontSize: '0.85rem',
+    boxSizing: 'border-box',
+  }
+
   const handleConnect = async () => {
     setChats([])
     setConnected(false)
@@ -305,56 +336,84 @@ function TeamsChat({ token, onAuthError }) {
 
           {selectedChats.length > 0 && (
             <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.75rem',
               marginTop: '0.75rem',
-              padding: '0.75rem 1rem',
+              padding: '0.85rem 1rem',
               background: 'var(--accent-bg, #f0f4ff)',
-              borderRadius: '8px',
-              flexWrap: 'wrap',
+              borderRadius: '10px',
             }}>
-              <span style={{ fontSize: '0.9rem', fontWeight: 500, whiteSpace: 'nowrap' }}>时间范围（可选）</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, flexWrap: 'wrap' }}>
-                <input
-                  type="datetime-local"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  max={endDate || undefined}
-                  disabled={exporting}
-                  style={{ flex: 1, minWidth: '190px' }}
-                />
-                <span style={{ color: '#888' }}>至</span>
-                <input
-                  type="datetime-local"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  min={startDate || undefined}
-                  disabled={exporting}
-                  style={{ flex: 1, minWidth: '190px' }}
-                />
-                {(startDate || endDate) && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.7rem', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '0.92rem', fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: '0.3rem' }}>
+                  时间范围
+                  <span style={{ fontWeight: 400, color: '#8a8f98', fontSize: '0.78rem' }}>可选</span>
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{ fontSize: '0.82rem', color: '#666' }}>导出格式</span>
+                  <select
+                    value={exportFormat}
+                    onChange={(e) => setExportFormat(e.target.value)}
+                    disabled={exporting}
+                    style={{ ...ctrlStyle, height: '30px' }}
+                  >
+                    <option value="html">HTML</option>
+                    <option value="txt">TXT</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {[
+                  { key: 'start', label: '起始', parts: sp, setter: setStart, dateProps: { max: ep.date || undefined },
+                    hourDisabled: (h) => sameDay && Number(h) > Number(ep.hour),
+                    minDisabled: (m) => sameDay && sp.hour === ep.hour && Number(m) > Number(ep.minute) },
+                  { key: 'end', label: '结束', parts: ep, setter: setEnd, dateProps: { min: sp.date || undefined },
+                    hourDisabled: (h) => sameDay && Number(h) < Number(sp.hour),
+                    minDisabled: (m) => sameDay && ep.hour === sp.hour && Number(m) < Number(sp.minute) },
+                ].map(({ key, label, parts, setter, dateProps, hourDisabled, minDisabled }) => (
+                  <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.82rem', color: '#8a8f98', width: '2.6em', flexShrink: 0 }}>{label}</span>
+                    <input
+                      type="date"
+                      value={parts.date}
+                      onChange={(e) => setter({ ...parts, date: e.target.value })}
+                      {...dateProps}
+                      disabled={exporting}
+                      style={{ ...ctrlStyle, flex: 1, minWidth: '150px' }}
+                    />
+                    <select
+                      value={parts.hour}
+                      onChange={(e) => setter({ ...parts, hour: e.target.value })}
+                      disabled={exporting || !parts.date}
+                      style={{ ...ctrlStyle, width: '4.5em' }}
+                    >
+                      {HOURS.map((h) => (
+                        <option key={h} value={h} disabled={hourDisabled(h)}>{h}时</option>
+                      ))}
+                    </select>
+                    <select
+                      value={parts.minute}
+                      onChange={(e) => setter({ ...parts, minute: e.target.value })}
+                      disabled={exporting || !parts.date}
+                      style={{ ...ctrlStyle, width: '4.5em' }}
+                    >
+                      {MINUTES.map((m) => (
+                        <option key={m} value={m} disabled={minDisabled(m)}>{m}分</option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+
+              {(startDate || endDate) && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
                   <button
                     onClick={() => { setStartDate(''); setEndDate('') }}
                     disabled={exporting}
-                    style={{ padding: '0.3rem 0.6rem', fontSize: '0.8rem', background: 'transparent', border: '1px solid var(--border-color, #ccc)', borderRadius: '6px', cursor: 'pointer' }}
+                    style={{ padding: '0.25rem 0.7rem', fontSize: '0.8rem', color: '#666', background: 'transparent', border: '1px solid var(--border-color, #d5dae2)', borderRadius: '7px', cursor: 'pointer' }}
                   >
-                    清除
+                    清除时间
                   </button>
-                )}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', whiteSpace: 'nowrap' }}>
-                <span style={{ fontSize: '0.85rem', color: '#888' }}>格式</span>
-                <select
-                  value={exportFormat}
-                  onChange={(e) => setExportFormat(e.target.value)}
-                  disabled={exporting}
-                  style={{ padding: '0.3rem 0.5rem', borderRadius: '6px' }}
-                >
-                  <option value="html">HTML</option>
-                  <option value="txt">TXT</option>
-                </select>
-              </div>
+                </div>
+              )}
             </div>
           )}
 

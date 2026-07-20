@@ -494,6 +494,37 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
 
     async def grab():
         nonlocal order
+        # Give lazily-loaded inline images a moment to finish decoding before we
+        # read them — otherwise their src is still a placeholder and naturalWidth
+        # is 0, so they'd be filtered out and lost once we scroll past them.
+        try:
+            await page.evaluate(
+                r"""
+                async () => {
+                    const pending = [];
+                    document.querySelectorAll('[data-tid="chat-pane-message"] img').forEach(im => {
+                        const tidEl = im.closest('[data-tid]');
+                        const tid = tidEl ? tidEl.getAttribute('data-tid') : '';
+                        if (tid === 'emoticon-renderer') return;
+                        const alt = (im.getAttribute('alt') || '').toLowerCase();
+                        if (alt.includes('avatar') || alt.includes('profile')) return;
+                        const rect = im.getBoundingClientRect();
+                        const w = im.naturalWidth || rect.width || 0;
+                        const h = im.naturalHeight || rect.height || 0;
+                        if (w <= 40 && h <= 40) return;
+                        if (!im.complete || im.naturalWidth === 0) pending.push(im);
+                    });
+                    await Promise.all(pending.map(im => new Promise(res => {
+                        const done = () => res();
+                        im.addEventListener('load', done, { once: true });
+                        im.addEventListener('error', done, { once: true });
+                        setTimeout(done, 4000);
+                    })));
+                }
+                """
+            )
+        except Exception:
+            pass
         rows = await page.evaluate(
             r"""
             () => {
@@ -556,8 +587,12 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                     // Classify <img> elements: emoji (emoticon-renderer) → keep as
                     // their alt char; real pasted images/GIFs → collect src so we
                     // can fetch the bytes; avatars/placeholders → ignore.
+                    // imgTotal counts EVERY content image (loaded or still a lazy
+                    // placeholder) so the caller knows how many to expect; imgSrcs
+                    // holds only the ones that have actually finished loading.
                     const emojis = [];
                     const imgSrcs = [];
+                    let imgTotal = 0;
                     el.querySelectorAll('img').forEach(im => {
                         if (rxEl && rxEl.contains(im)) return;  // belongs to a reaction chip
                         if (atEl && atEl.contains(im)) return;  // attachment thumbnail
@@ -571,14 +606,21 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                         }
                         if (altL.includes('avatar') || altL.includes('profile')) return;
                         const src = im.src || '';
-                        if (!src || src.startsWith(PLACEHOLDER)) return;  // not loaded yet
-                        if (im.naturalWidth <= 40 && im.naturalHeight <= 40) return; // tiny icon
-                        imgSrcs.push(src);
+                        // Size via natural dims when loaded, else the reserved
+                        // layout box — lets us tell a real content image that is
+                        // still lazy-loading apart from a tiny UI icon.
+                        const rect = im.getBoundingClientRect();
+                        const w = im.naturalWidth || rect.width || 0;
+                        const h = im.naturalHeight || rect.height || 0;
+                        if (w <= 40 && h <= 40) return; // tiny icon
+                        imgTotal += 1;
+                        const loaded = src && !src.startsWith(PLACEHOLDER) && im.naturalWidth > 40;
+                        if (loaded) imgSrcs.push(src);
                     });
                     if (emojis.length) {
                         body = (body + ' ' + emojis.join('')).trim();
                     }
-                    out.push({ author, ts, mid, body, imgSrcs, reactions, attachCount });
+                    out.push({ author, ts, mid, body, imgSrcs, imgTotal, reactions, attachCount });
                 });
                 return out;
             }
@@ -603,7 +645,8 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
             if key not in collected:
                 collected[key] = {"author": author, "ts": ts, "body": body,
                                   "reactions": reactions, "attach": attach,
-                                  "imgs": [], "imgmiss": 0, "_o": order}
+                                  "imgs": [], "imgmiss": 0, "_imgseen": set(),
+                                  "_imgexpect": 0, "_o": order}
                 order += 1
             else:
                 # Reactions/attachments can render late (after the message fully
@@ -612,38 +655,60 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                     collected[key]["reactions"] = reactions
                 if attach and not collected[key].get("attach"):
                     collected[key]["attach"] = attach
-            # Queue any real content images for download (once per message, when
-            # they've actually loaded). blob: URLs are only valid while the image
-            # is in the DOM, so we must fetch the bytes now, during scraping.
-            srcs = r.get("imgSrcs") or []
             msg = collected[key]
-            if srcs and not msg.get("_imgdone"):
-                msg["_imgdone"] = True
-                msg["_imgexpect"] = len(srcs)
-                for s in srcs:
+            # How many content images this message has (loaded + lazy). Inline
+            # images load lazily, so a message may show 0 loaded on the first
+            # pass and N later — track the MAX so we know the true expected count.
+            total = int(r.get("imgTotal") or 0)
+            if total > msg.get("_imgexpect", 0):
+                msg["_imgexpect"] = total
+            # Queue newly-loaded image srcs we haven't fetched yet. Dedupe by src
+            # (not a one-shot flag) so images that finish loading on a LATER
+            # scroll pass are still captured instead of being lost forever.
+            for s in (r.get("imgSrcs") or []):
+                if s and s not in msg["_imgseen"]:
+                    msg["_imgseen"].add(s)
                     new_fetch.append((key, s))
 
         # Download newly-seen images to base64 inside the authenticated page
-        # (carries the Teams session, so blob:/CDN URLs return real bytes).
+        # (carries the Teams session, so blob:/CDN URLs return real bytes). If a
+        # direct fetch is blocked (auth/CORS), fall back to painting the already-
+        # decoded <img> onto a canvas and reading that back as a data URL.
         if new_fetch:
             data_uris = await page.evaluate(
                 """
                 async (srcs) => {
                     const out = [];
                     for (const src of srcs) {
+                        let uri = null;
                         try {
                             const r = await fetch(src);
-                            if (!r.ok) { out.push(null); continue; }
-                            const blob = await r.blob();
-                            if (!blob || !blob.size || blob.size > 8000000) { out.push(null); continue; }
-                            const uri = await new Promise(res => {
-                                const fr = new FileReader();
-                                fr.onload = () => res(fr.result);
-                                fr.onerror = () => res(null);
-                                fr.readAsDataURL(blob);
-                            });
-                            out.push(uri);
-                        } catch (e) { out.push(null); }
+                            if (r.ok) {
+                                const blob = await r.blob();
+                                if (blob && blob.size && blob.size <= 8000000) {
+                                    uri = await new Promise(res => {
+                                        const fr = new FileReader();
+                                        fr.onload = () => res(fr.result);
+                                        fr.onerror = () => res(null);
+                                        fr.readAsDataURL(blob);
+                                    });
+                                }
+                            }
+                        } catch (e) { uri = null; }
+                        if (!uri || !(''+uri).startsWith('data:image')) {
+                            try {
+                                const im = Array.from(document.images)
+                                    .find(x => x.src === src && x.naturalWidth > 0);
+                                if (im) {
+                                    const c = document.createElement('canvas');
+                                    c.width = im.naturalWidth;
+                                    c.height = im.naturalHeight;
+                                    c.getContext('2d').drawImage(im, 0, 0);
+                                    uri = c.toDataURL('image/png');
+                                }
+                            } catch (e) { /* canvas tainted by cross-origin image */ }
+                        }
+                        out.push(uri && (''+uri).startsWith('data:image') ? uri : null);
                     }
                     return out;
                 }
@@ -656,8 +721,6 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
                     continue
                 if uri and isinstance(uri, str) and uri.startswith("data:image"):
                     msg["imgs"].append(uri)
-                else:
-                    msg["imgmiss"] = msg.get("imgmiss", 0) + 1
 
     # The message pane renders lazily after the chat opens. Wait until at least
     # one message is actually present before scraping; otherwise the first grab
@@ -749,11 +812,57 @@ async def _scrape_messages(page, stop_before: str = "") -> list[dict]:
         if i % 10 == 9:
             status(f"Loaded {len(collected)} messages so far…")
 
+    # Settle pass: we only ever jumped to the TOP to load history, so most inline
+    # images further down are still lazy placeholders. Scroll the whole thread
+    # through the viewport once so every image intersects and loads, grabbing as
+    # we go (grab() waits for load, then fetches the freshly-decoded bytes).
+    try:
+        n_steps = await page.evaluate(
+            """
+            () => {
+                const cands = [
+                    document.querySelector('[data-tid="message-pane-list-viewport"]'),
+                    document.querySelector('[data-tid="message-pane-list-runway"]'),
+                    document.querySelector('[data-tid="message-pane-body"]'),
+                ].filter(Boolean);
+                const sc = cands[0];
+                if (!sc || !sc.clientHeight) return 0;
+                sc.scrollTop = 0;
+                return Math.ceil(sc.scrollHeight / sc.clientHeight) + 1;
+            }
+            """
+        )
+    except Exception:
+        n_steps = 0
+    for s in range(min(int(n_steps or 0), 60)):
+        await page.evaluate(
+            """
+            (step) => {
+                const cands = [
+                    document.querySelector('[data-tid="message-pane-list-viewport"]'),
+                    document.querySelector('[data-tid="message-pane-list-runway"]'),
+                    document.querySelector('[data-tid="message-pane-body"]'),
+                ].filter(Boolean);
+                const sc = cands[0];
+                if (sc) sc.scrollTop = Math.round(sc.clientHeight * 0.85 * step);
+            }
+            """,
+            s,
+        )
+        await asyncio.sleep(0.5)
+        await grab()
+
     msgs = sorted(collected.values(), key=lambda m: (m["ts"] or "", m["_o"]))
     for m in msgs:
+        # Turn any images we expected but never captured into a visible
+        # "[N 张图片未能保存]" trace instead of a silently-empty bubble.
+        expect = m.pop("_imgexpect", 0)
+        got = len(m.get("imgs") or [])
+        if expect > got:
+            m["imgmiss"] = max(int(m.get("imgmiss") or 0), expect - got)
         m.pop("_o", None)
+        m.pop("_imgseen", None)
         m.pop("_imgdone", None)
-        m.pop("_imgexpect", None)
     return msgs
 
 
