@@ -118,6 +118,14 @@ function HomePage({ onSelectTool }) {
       tags: ['Excel', 'openpyxl', '脚本', '查找'],
     },
     {
+      id: 'timezone',
+      icon: '🌍',
+      title: '时区转换',
+      description:
+        '在两个时区之间快速换算时间（如北京 ↔ 柏林 / 孟买），可选附加列出更多时区的当地时间，方便安排跨时区会议。',
+      tags: ['时区', 'Timezone', '会议'],
+    },
+    {
       id: 'sessionreader',
       icon: '📖',
       title: 'Copilot 会话阅读器',

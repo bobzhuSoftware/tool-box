@@ -1,0 +1,389 @@
+/* --- Timezone Converter --- */
+
+.tz-intro {
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.tz-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.tz-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #555;
+}
+
+.tz-time-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tz-datetime {
+  flex: 1;
+  min-width: 160px;
+  padding: 0.6rem 0.8rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.tz-datetime:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.tz-time-select {
+  flex: 0 0 auto;
+  min-width: 92px;
+  padding: 0.6rem 0.8rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.tz-time-select:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.btn-secondary {
+  padding: 0.6rem 1.1rem;
+  background: #f0f0ff;
+  color: #4b4bd6;
+  border: 2px solid #d9d9f7;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  background: #e4e4ff;
+}
+
+/* From / swap / To layout */
+.tz-convert-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.tz-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.tz-swap-btn {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 2px;
+  border-radius: 50%;
+  border: 2px solid #646cff;
+  background: #fff;
+  color: #646cff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tz-swap-btn:hover {
+  background: #646cff;
+  color: #fff;
+}
+
+/* Zone picker (combobox: input + live dropdown) */
+.tz-picker {
+  position: relative;
+}
+
+.tz-combo-input {
+  width: 100%;
+  padding: 0.55rem 1.8rem 0.55rem 0.6rem;
+  border: 1.5px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: #fff;
+  cursor: pointer;
+}
+
+.tz-combo-input:focus {
+  outline: none;
+  border-color: #646cff;
+  cursor: text;
+}
+
+.tz-combo-caret {
+  position: absolute;
+  right: 0.6rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #999;
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+
+.tz-combo-list {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  background: #fff;
+  border: 1.5px solid #d9d9f7;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.tz-combo-option {
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: #333;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tz-combo-option.active {
+  background: #f0f0ff;
+}
+
+.tz-combo-option.selected {
+  color: #4b4bd6;
+  font-weight: 600;
+}
+
+.tz-combo-empty {
+  padding: 0.6rem;
+  font-size: 0.85rem;
+  color: #999;
+  text-align: center;
+}
+
+/* Quick target chips */
+.tz-quick {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.tz-quick-label {
+  font-size: 0.82rem;
+  color: #777;
+}
+
+.tz-chip {
+  padding: 0.35rem 0.75rem;
+  border: 1.5px solid #d9d9f7;
+  background: #f6f6ff;
+  color: #4b4bd6;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tz-chip:hover {
+  background: #e4e4ff;
+}
+
+.tz-chip.active {
+  background: #646cff;
+  color: #fff;
+  border-color: #646cff;
+}
+
+/* Result cards */
+.tz-result-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+}
+
+.tz-result-card {
+  flex: 1;
+  min-width: 0;
+  border-radius: 10px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border: 1px solid #eee;
+}
+
+.tz-from-card {
+  background: #f7f8ff;
+}
+
+.tz-to-card {
+  background: #eef7f0;
+}
+
+.tz-card-tag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #999;
+  letter-spacing: 0.05em;
+}
+
+.tz-card-zone {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.tz-card-off {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #646cff;
+  margin-left: 0.25rem;
+}
+
+.tz-card-time {
+  font-size: 1.05rem;
+  color: #333;
+  line-height: 1.5;
+}
+
+.tz-arrow {
+  align-self: center;
+  font-size: 1.4rem;
+  color: #bbb;
+  flex-shrink: 0;
+}
+
+.tz-actions {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.tz-actions .btn-primary {
+  padding: 0.55rem 1.2rem;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Extra zones */
+.tz-extra {
+  border-top: 1px solid #eee;
+  padding-top: 0.75rem;
+}
+
+.tz-extra > summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #555;
+  user-select: none;
+}
+
+.tz-extra-add {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-width: 420px;
+}
+
+.tz-extra-hint {
+  font-size: 0.78rem;
+  color: #999;
+}
+
+.tz-extra-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tz-extra-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.8rem;
+  background: #fafafa;
+  border: 1px solid #eee;
+  border-radius: 8px;
+}
+
+.tz-extra-zone {
+  font-weight: 600;
+  color: #1a1a2e;
+  min-width: 140px;
+  flex-shrink: 0;
+}
+
+.tz-extra-time {
+  flex: 1;
+  color: #444;
+  font-size: 0.92rem;
+}
+
+.tz-extra-remove {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  background: #f0f0f0;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: all 0.2s;
+}
+
+.tz-extra-remove:hover {
+  background: #ffe0e0;
+  color: #c62828;
+}
+
+.tz-empty {
+  color: #999;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .tz-convert-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .tz-swap-btn {
+    align-self: center;
+    transform: rotate(90deg);
+  }
+
+  .tz-result-grid {
+    flex-direction: column;
+  }
+
+  .tz-arrow {
+    transform: rotate(90deg);
+  }
+}
