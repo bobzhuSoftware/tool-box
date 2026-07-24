@@ -15,5 +15,6 @@ openpyxl>=3.1.0
 pycryptodome>=3.23.0
 lz4>=4.4.5
 PyAudioWPatch>=0.2.12.7; sys_platform == "win32"
+pycaw>=20240210; sys_platform == "win32"
 windows-capture>=2.0.0; sys_platform == "win32"
 opencv-python>=4.10.0; sys_platform == "win32"

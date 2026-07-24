@@ -3,10 +3,12 @@ import json
 import os
 import queue as stdlib_queue
 import shutil
+import struct
 import sys
 import tempfile
 import threading
 import uuid
+import wave
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,6 +40,59 @@ def _audio_file_path(job_id: str, fmt: str = "wav") -> str:
 
 def _audio_meta_path(job_id: str) -> str:
     return os.path.join(_AUDIO_CACHE_DIR, f"{job_id}.json")
+
+
+def _repair_wav_header(path: str) -> bool:
+    """Patch a canonical 44-byte-header WAV whose writer died before it wrote
+    the real RIFF/data chunk sizes, so the whole recorded body becomes readable.
+    Returns True if the file now looks like a valid, non-empty WAV."""
+    try:
+        size = os.path.getsize(path)
+        if size <= 44:
+            return False
+        with open(path, "r+b") as f:
+            header = f.read(44)
+            if (header[:4] != b"RIFF" or header[8:12] != b"WAVE"
+                    or header[36:40] != b"data"):
+                return False
+            data_bytes = size - 44
+            f.seek(4)
+            f.write(struct.pack("<L", 36 + data_bytes))   # RIFF chunk size
+            f.seek(40)
+            f.write(struct.pack("<L", data_bytes))         # data chunk size
+        return True
+    except Exception:
+        return False
+
+
+def _salvage_partial_wav(wav_path: str, mic_path: str | None) -> dict | None:
+    """Best-effort recovery of a recording whose worker never reported DONE
+    (it crashed, hung, or the device dropped before finalizing). Returns a
+    result dict compatible with the normal finalize path, or None if there is
+    no usable audio to keep."""
+    try:
+        if not os.path.isfile(wav_path) or os.path.getsize(wav_path) <= 1024:
+            return None
+        _repair_wav_header(wav_path)
+        with wave.open(wav_path, "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate() or 1
+        if frames <= 0:
+            return None
+        if mic_path and os.path.isfile(mic_path) and os.path.getsize(mic_path) > 1024:
+            _repair_wav_header(mic_path)
+            has_mic = True
+        else:
+            has_mic = False
+        return {
+            "seconds": round(frames / rate, 2) if rate else 0,
+            "bytes": os.path.getsize(wav_path),
+            "mic": has_mic,
+            "peak": 0,
+            "interrupted": True,
+        }
+    except Exception:
+        return None
 
 
 def _cleanup_old_audio(max_age_seconds: int = 3600) -> None:
@@ -205,146 +260,233 @@ def audio_start(req: AudioStartRequest, user: User = Depends(require_user)):
         "user_id": user.id,
         "format": fmt,
         "started_at": datetime.now().timestamp(),
+        "lock": threading.Lock(),
     }
+    # Watch for the worker exiting on its own — the OS default playback device
+    # changed / dropped (headphones unplugged, Bluetooth lost), the 2-hour cap
+    # was hit, or it crashed. In every such case finalize the recording right
+    # away so it's saved and the UI's /active poll can flip to "stopped"
+    # without the user having to click stop.
+    threading.Thread(target=_monitor_recording, args=(job_id,), daemon=True).start()
     return {"job_id": job_id, "format": fmt, "mic": bool(mic_path)}
+
+
+# Cache of finalized payloads so a late manual /stop (arriving after the
+# background monitor already finalized an auto-stop) still gets a real result
+# instead of a 404.
+_finalized_results: dict[str, dict] = {}
+
+
+def _remember_finalized(job_id: str, payload: dict) -> None:
+    _finalized_results[job_id] = payload
+    if len(_finalized_results) > 50:
+        for k in list(_finalized_results)[:-50]:
+            _finalized_results.pop(k, None)
+
+
+def _finalize_recording(job_id: str) -> dict | None:
+    """Drain the worker's DONE result, convert/cache the audio and write meta —
+    exactly once per recording. Safe to call from both the manual /stop handler
+    and the background exit monitor; the per-recording lock serialises them and
+    later callers get the cached payload. Returns the result payload (with an
+    ``error`` key on failure), or None if there is nothing to finalize."""
+    rec = audio_recordings.get(job_id)
+    if rec is None:
+        return _finalized_results.get(job_id)
+    with rec["lock"]:
+        rec = audio_recordings.get(job_id)
+        if rec is None:
+            return _finalized_results.get(job_id)
+
+        proc = rec["proc"]
+        q: stdlib_queue.Queue = rec["queue"]
+
+        result: dict | None = None
+        err_msg: str | None = None
+        deadline = datetime.now().timestamp() + 10
+        while True:
+            remaining = deadline - datetime.now().timestamp()
+            if remaining <= 0:
+                break
+            try:
+                line = q.get(timeout=remaining)
+            except stdlib_queue.Empty:
+                break
+            if line is None:
+                break
+            if line.startswith("DONE:"):
+                try:
+                    result = json.loads(line[5:])
+                except Exception:
+                    result = {}
+                break
+            if line.startswith("ERROR:"):
+                err_msg = line[6:]
+                break
+
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+        audio_recordings.pop(job_id, None)
+        wav_path = rec["wav_path"]
+        mic_path = rec.get("mic_path")
+        user_id = rec["user_id"]
+        fmt = rec["format"]
+
+        def _cleanup_mic():
+            if mic_path:
+                try:
+                    os.unlink(mic_path)
+                except OSError:
+                    pass
+
+        if result is None:
+            # The worker never reported DONE — it crashed, hung, or the capture
+            # device dropped before it could finalize the WAV. Try to salvage
+            # the audio written so far (patching the header if the worker died
+            # before wave.close() wrote the real chunk sizes) so a partial
+            # recording is still downloadable instead of being thrown away.
+            result = _salvage_partial_wav(wav_path, mic_path)
+            if result is None:
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    pass
+                _cleanup_mic()
+                payload = {"error": err_msg or "录制结束失败"}
+                _remember_finalized(job_id, payload)
+                return payload
+
+        final_path = _audio_file_path(job_id, fmt)
+        has_mic = bool(
+            result.get("mic") and mic_path and os.path.isfile(mic_path)
+            and os.path.getsize(mic_path) > 1024
+        )
+        try:
+            import subprocess as _sp
+            ff = shutil.which("ffmpeg") or "ffmpeg"
+            if has_mic:
+                # Mix the application/system track with the microphone track.
+                # normalize=0 keeps both sources at full volume (ffmpeg resamples
+                # automatically if the two tracks differ in rate/channels).
+                filt = "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0"
+                cmd = [ff, "-y", "-i", wav_path, "-i", mic_path,
+                       "-filter_complex", filt, "-ac", "2"]
+                if fmt == "mp3":
+                    cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
+                cmd += [final_path]
+                cp = _sp.run(cmd, capture_output=True, text=True)
+                for p in (wav_path, mic_path):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+                if cp.returncode != 0 or not os.path.isfile(final_path):
+                    payload = {"error": "音频混合失败（ffmpeg）"}
+                    _remember_finalized(job_id, payload)
+                    return payload
+            elif fmt == "mp3":
+                cp = _sp.run(
+                    [ff, "-y", "-i", wav_path, "-c:a", "libmp3lame", "-b:a", "192k", final_path],
+                    capture_output=True, text=True,
+                )
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    pass
+                _cleanup_mic()
+                if cp.returncode != 0 or not os.path.isfile(final_path):
+                    payload = {"error": "MP3 转码失败（ffmpeg）"}
+                    _remember_finalized(job_id, payload)
+                    return payload
+            else:
+                shutil.move(wav_path, final_path)
+                _cleanup_mic()
+        except Exception as exc:
+            _cleanup_mic()
+            payload = {"error": f"保存音频失败: {exc}"}
+            _remember_finalized(job_id, payload)
+            return payload
+
+        with open(_audio_meta_path(job_id), "w", encoding="utf-8") as f:
+            json.dump({
+                "user_id": user_id,
+                "format": fmt,
+                "seconds": result.get("seconds", 0),
+                "mic": has_mic,
+                "peak": int(result.get("peak", 0) or 0),
+                "interrupted": bool(result.get("interrupted")),
+                "bytes": os.path.getsize(final_path),
+                "created_at": datetime.now().timestamp(),
+            }, f)
+
+        peak = int(result.get("peak", 0) or 0)
+        payload = {
+            "job_id": job_id,
+            "format": fmt,
+            "seconds": result.get("seconds", 0),
+            "mic": has_mic,
+            "peak": peak,
+            "silent": peak < 64,  # ~-54 dBFS; essentially no audio captured
+            "interrupted": bool(result.get("interrupted")),
+            "bytes": os.path.getsize(final_path),
+        }
+        _remember_finalized(job_id, payload)
+        return payload
+
+
+def _monitor_recording(job_id: str) -> None:
+    """Block until the worker process exits — a self-stop on default-device
+    change/drop, the 2-hour cap, a crash, or the manual /stop path — then
+    finalize the recording idempotently so it is always saved."""
+    rec = audio_recordings.get(job_id)
+    if rec is None:
+        return
+    try:
+        rec["proc"].wait()
+    except Exception:
+        pass
+    try:
+        _finalize_recording(job_id)
+    except Exception:
+        pass
 
 
 @router.post("/api/audio/stop/{job_id}")
 def audio_stop(job_id: str, user: User = Depends(require_user)):
     """Stop an active recording, finalize the file, and cache it for download."""
     rec = audio_recordings.get(job_id)
-    if not rec or rec["user_id"] != user.id:
+    if rec is None:
+        # Already finalized — e.g. the background monitor handled an auto-stop
+        # (device changed/unplugged) before the user's click arrived.
+        cached = _finalized_results.get(job_id)
+        if cached is not None:
+            if cached.get("error"):
+                raise HTTPException(status_code=500, detail=cached["error"])
+            return cached
+        raise HTTPException(status_code=404, detail="录制任务不存在或已结束")
+    if rec["user_id"] != user.id:
         raise HTTPException(status_code=404, detail="录制任务不存在或已结束")
 
-    proc = rec["proc"]
-    q: stdlib_queue.Queue = rec["queue"]
-
-    # Signal the worker to stop and finalize the WAV.
+    # Signal the worker to stop and finalize the WAV, then finalize server-side.
     try:
-        proc.stdin.write("STOP\n")
-        proc.stdin.flush()
+        rec["proc"].stdin.write("STOP\n")
+        rec["proc"].stdin.flush()
     except Exception:
         pass
 
-    result: dict | None = None
-    err_msg: str | None = None
-    deadline = datetime.now().timestamp() + 30
-    while True:
-        remaining = deadline - datetime.now().timestamp()
-        if remaining <= 0:
-            break
-        try:
-            line = q.get(timeout=remaining)
-        except stdlib_queue.Empty:
-            break
-        if line is None:
-            break
-        if line.startswith("DONE:"):
-            try:
-                result = json.loads(line[5:])
-            except Exception:
-                result = {}
-            break
-        if line.startswith("ERROR:"):
-            err_msg = line[6:]
-            break
-
-    try:
-        proc.wait(timeout=5)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-    audio_recordings.pop(job_id, None)
-    wav_path = rec["wav_path"]
-    mic_path = rec.get("mic_path")
-
-    def _cleanup_mic():
-        if mic_path:
-            try:
-                os.unlink(mic_path)
-            except OSError:
-                pass
-
-    if result is None:
-        try:
-            os.unlink(wav_path)
-        except OSError:
-            pass
-        _cleanup_mic()
-        raise HTTPException(status_code=500, detail=err_msg or "录制结束失败")
-
-    fmt = rec["format"]
-    final_path = _audio_file_path(job_id, fmt)
-    has_mic = bool(
-        result.get("mic") and mic_path and os.path.isfile(mic_path)
-        and os.path.getsize(mic_path) > 1024
-    )
-    try:
-        import subprocess as _sp
-        ff = shutil.which("ffmpeg") or "ffmpeg"
-        if has_mic:
-            # Mix the application/system track with the microphone track.
-            # normalize=0 keeps both sources at full volume (ffmpeg resamples
-            # automatically if the two tracks differ in rate/channels).
-            filt = "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0"
-            cmd = [ff, "-y", "-i", wav_path, "-i", mic_path,
-                   "-filter_complex", filt, "-ac", "2"]
-            if fmt == "mp3":
-                cmd += ["-c:a", "libmp3lame", "-b:a", "192k"]
-            cmd += [final_path]
-            cp = _sp.run(cmd, capture_output=True, text=True)
-            for p in (wav_path, mic_path):
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-            if cp.returncode != 0 or not os.path.isfile(final_path):
-                raise HTTPException(status_code=500, detail="音频混合失败（ffmpeg）")
-        elif fmt == "mp3":
-            cp = _sp.run(
-                [ff, "-y", "-i", wav_path, "-c:a", "libmp3lame", "-b:a", "192k", final_path],
-                capture_output=True, text=True,
-            )
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
-            _cleanup_mic()
-            if cp.returncode != 0 or not os.path.isfile(final_path):
-                raise HTTPException(status_code=500, detail="MP3 转码失败（ffmpeg）")
-        else:
-            shutil.move(wav_path, final_path)
-            _cleanup_mic()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _cleanup_mic()
-        raise HTTPException(status_code=500, detail=f"保存音频失败: {exc}")
-
-    with open(_audio_meta_path(job_id), "w", encoding="utf-8") as f:
-        json.dump({
-            "user_id": user.id,
-            "format": fmt,
-            "seconds": result.get("seconds", 0),
-            "mic": has_mic,
-            "peak": int(result.get("peak", 0) or 0),
-            "bytes": os.path.getsize(final_path),
-            "created_at": datetime.now().timestamp(),
-        }, f)
-
-    peak = int(result.get("peak", 0) or 0)
-    return {
-        "job_id": job_id,
-        "format": fmt,
-        "seconds": result.get("seconds", 0),
-        "mic": has_mic,
-        "peak": peak,
-        "silent": peak < 64,  # ~-54 dBFS; essentially no audio captured
-        "bytes": os.path.getsize(final_path),
-    }
+    payload = _finalize_recording(job_id)
+    if payload is None:
+        raise HTTPException(status_code=500, detail="录制结束失败")
+    if payload.get("error"):
+        raise HTTPException(status_code=500, detail=payload["error"])
+    return payload
 
 
 @router.get("/api/audio/last")
@@ -381,6 +523,7 @@ def audio_last(user: User = Depends(require_user)):
         "mic": bool(meta.get("mic")),
         "peak": peak,
         "silent": ("peak" in meta) and peak < 64,
+        "interrupted": bool(meta.get("interrupted")),
         "bytes": meta.get("bytes") or os.path.getsize(audio_file),
         "recovered": True,
     }

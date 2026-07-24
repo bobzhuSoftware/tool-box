@@ -129,6 +129,31 @@ function AudioRecorder({ token, onAuthError }) {
     }
   }
 
+  // While recording, poll the backend so an auto-stop (playback device
+  // unplugged/changed, Bluetooth dropped, or the 2-hour cap) surfaces in the
+  // UI without the user having to click stop. The recording runs in a backend
+  // subprocess that finalizes itself on such events, so once it is no longer
+  // reported as running we finalize the UI too (the /stop call is idempotent
+  // server-side and returns this job's saved result).
+  useEffect(() => {
+    if (!recording || !jobId || busy) return
+    let cancelled = false
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch('/api/audio/active', { headers: authHeaders() })
+        if (!res.ok || cancelled) return
+        const list = await res.json()
+        const stillRunning = Array.isArray(list)
+          && list.some((j) => j.job_id === jobId && j.running)
+        if (!stillRunning && !cancelled) {
+          clearInterval(id)
+          handleStop()
+        }
+      } catch { /* ignore transient network errors */ }
+    }, 2500)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [recording, jobId, busy]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleDownload = () => {
     if (!result?.job_id) return
     const url = `/api/audio/download/${result.job_id}?token=${encodeURIComponent(token || '')}`
@@ -210,6 +235,16 @@ function AudioRecorder({ token, onAuthError }) {
             </span>
             <button onClick={handleDownload}>⬇ 下载音频</button>
           </div>
+          {result.interrupted && (
+            <div style={{
+              marginTop: '0.75rem', padding: '0.8rem 1rem', borderRadius: '10px',
+              background: '#fffbe6', border: '1px solid #ffe58f', color: '#874d00',
+              fontSize: '0.88rem', lineHeight: 1.5,
+            }}>
+              ⚠ 录音过程中检测到<strong>播放设备变化或断开</strong>（例如切换/拔出耳机、蓝牙掉线）。
+              录音已在中断点自动结束并保存，你可以下载这段录音，然后重新开始录制。
+            </div>
+          )}
           {result.silent && (
             <div style={{
               marginTop: '0.75rem', padding: '0.8rem 1rem', borderRadius: '10px',
