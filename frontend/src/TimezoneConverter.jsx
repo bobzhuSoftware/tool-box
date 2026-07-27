@@ -189,6 +189,36 @@ function formatInZone(date, timeZone) {
   }
 }
 
+// Big ticking clock time, e.g. "09:05:07", used by the world clock.
+function formatClockTime(date, timeZone) {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(date)
+  } catch {
+    return ''
+  }
+}
+
+// Weekday + date line under the clock, e.g. "周一 2026-07-27".
+function formatClockDate(date, timeZone) {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone,
+      weekday: 'short',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date)
+  } catch {
+    return ''
+  }
+}
+
 // Compact form used inside the copy-to-clipboard text, e.g. "2026-07-21 09:00".
 function formatCompact(date, timeZone) {
   try {
@@ -435,24 +465,37 @@ function TimezoneConverter() {
   const [fromZone, setFromZone] = useState(prefs.fromZone || localZone || 'Asia/Shanghai')
   const [toZone, setToZone] = useState(prefs.toZone || 'Europe/Berlin')
   const [extraZones, setExtraZones] = useState(prefs.extraZones || [])
+  const [worldClockZones, setWorldClockZones] = useState(
+    prefs.worldClockZones || ['Asia/Shanghai', 'Europe/Berlin', 'America/New_York']
+  )
   const [dateStr, setDateStr] = useState(() =>
     roundToHalfHour(toLocalInputValue(new Date(), prefs.fromZone || localZone || 'Asia/Shanghai'))
   )
   const [copied, setCopied] = useState(false)
 
+  // Live "now" used by the world clock, refreshed every second.
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
   // Persist preferences.
   useEffect(() => {
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ fromZone, toZone, extraZones }))
+      localStorage.setItem(
+        LS_KEY,
+        JSON.stringify({ fromZone, toZone, extraZones, worldClockZones })
+      )
     } catch {
       /* ignore */
     }
-  }, [fromZone, toZone, extraZones])
+  }, [fromZone, toZone, extraZones, worldClockZones])
 
   // The real instant represented by the entered wall-clock time in the source zone.
   const instant = useMemo(() => zonedWallTimeToUtc(dateStr, fromZone), [dateStr, fromZone])
 
-  const setNow = () => setDateStr(roundToHalfHour(toLocalInputValue(new Date(), fromZone)))
+  const useNowTime = () => setDateStr(roundToHalfHour(toLocalInputValue(new Date(), fromZone)))
 
   const swap = () => {
     if (!instant) {
@@ -474,6 +517,12 @@ function TimezoneConverter() {
   }
   const removeExtra = (z) => setExtraZones(extraZones.filter((x) => x !== z))
 
+  const addClock = (z) => {
+    if (!z || worldClockZones.includes(z)) return
+    setWorldClockZones([...worldClockZones, z])
+  }
+  const removeClock = (z) => setWorldClockZones(worldClockZones.filter((x) => x !== z))
+
   const copyResult = async () => {
     if (!instant) return
     const line = (z) => `${formatCompact(instant, z)} ${shortName(z)}（${offsetLabel(z, instant)}）`
@@ -491,6 +540,50 @@ function TimezoneConverter() {
   return (
     <>
       <h2 className="tool-page-title">🌍 时区转换</h2>
+
+      {/* World clock: fixed live times for chosen regions (persists across visits) */}
+      <div className="input-section tz-worldclock">
+        <div className="tz-worldclock-head">
+          <h3 className="tz-worldclock-title">🕒 世界时钟</h3>
+          <span className="tz-worldclock-hint">固定展示所选地区的实时时间，设置会自动保存</span>
+        </div>
+
+        <div className="tz-field tz-worldclock-add">
+          <ZonePicker
+            value=""
+            onChange={addClock}
+            allZones={allZones.filter((z) => !worldClockZones.includes(z))}
+            refDate={now}
+            placeholder="添加要固定显示的地区…"
+          />
+        </div>
+
+        {worldClockZones.length > 0 ? (
+          <div className="tz-clock-grid">
+            {worldClockZones.map((z) => (
+              <div key={z} className="tz-clock-card">
+                <button
+                  type="button"
+                  className="tz-clock-remove"
+                  onClick={() => removeClock(z)}
+                  aria-label={`移除 ${z}`}
+                  title="移除"
+                >
+                  ✕
+                </button>
+                <div className="tz-clock-zone">
+                  {shortName(z)}
+                  <span className="tz-card-off"> {offsetLabel(z, now)}</span>
+                </div>
+                <div className="tz-clock-time">{formatClockTime(now, z)}</div>
+                <div className="tz-clock-date">{formatClockDate(now, z)}</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="tz-empty">尚未添加地区，使用上方搜索框添加。</p>
+        )}
+      </div>
 
       <div className="input-section">
         <p className="tz-intro">
@@ -524,7 +617,7 @@ function TimezoneConverter() {
                 </option>
               ))}
             </select>
-            <button type="button" className="btn-secondary" onClick={setNow}>
+            <button type="button" className="btn-secondary" onClick={useNowTime}>
               用现在时间
             </button>
           </div>

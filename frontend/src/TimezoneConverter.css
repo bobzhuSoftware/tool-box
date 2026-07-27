@@ -368,6 +368,92 @@
   margin: 0;
 }
 
+/* World clock */
+.tz-worldclock-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.tz-worldclock-title {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #1a1a2e;
+}
+
+.tz-worldclock-hint {
+  font-size: 0.8rem;
+  color: #999;
+}
+
+.tz-worldclock-add {
+  max-width: 420px;
+}
+
+.tz-clock-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.tz-clock-card {
+  position: relative;
+  border-radius: 12px;
+  padding: 1rem 1rem 0.85rem;
+  background: linear-gradient(135deg, #f7f8ff, #eef2ff);
+  border: 1px solid #e4e4ff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.tz-clock-remove {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.06);
+  color: #888;
+  cursor: pointer;
+  font-size: 0.72rem;
+  line-height: 1;
+  opacity: 0;
+  transition: all 0.2s;
+}
+
+.tz-clock-card:hover .tz-clock-remove {
+  opacity: 1;
+}
+
+.tz-clock-remove:hover {
+  background: #ffe0e0;
+  color: #c62828;
+}
+
+.tz-clock-zone {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  padding-right: 1.4rem;
+}
+
+.tz-clock-time {
+  font-size: 1.85rem;
+  font-weight: 700;
+  color: #4b4bd6;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.tz-clock-date {
+  font-size: 0.8rem;
+  color: #777;
+}
+
 @media (max-width: 640px) {
   .tz-convert-row {
     flex-direction: column;
