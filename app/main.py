@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.auth import router as auth_router
+from app.routers.app_control import router as app_control_router
 from app.routers.audio import router as audio_router
 from app.routers.excel import router as excel_router
 from app.routers.book import router as book_router
@@ -35,6 +36,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 # ---------------------------------------------------------------------------
 app = FastAPI()
 app.include_router(auth_router)
+app.include_router(app_control_router)
 app.include_router(audio_router)
 app.include_router(excel_router)
 app.include_router(book_router)

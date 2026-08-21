@@ -17,8 +17,25 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-import whisper
-import yt_dlp
+# Deferred heavy imports: `import whisper` pulls in torch and `import yt_dlp`
+# is sizable — both cost seconds at process start. This proxy imports the real
+# module only on first attribute access so the backend boots fast.
+import importlib
+
+
+class _LazyModule:
+    def __init__(self, name: str):
+        self._name = name
+        self._mod = None
+
+    def __getattr__(self, attr):
+        if self._mod is None:
+            self._mod = importlib.import_module(self._name)
+        return getattr(self._mod, attr)
+
+
+whisper = _LazyModule("whisper")
+yt_dlp = _LazyModule("yt_dlp")
 
 from app.core.auth import require_user, user_from_token_or_header
 from app.core.cookies import (

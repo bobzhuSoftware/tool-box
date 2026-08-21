@@ -9,7 +9,9 @@
     "dev:frontend": "cd frontend && npm run dev",
     "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build": "cd frontend && npm run build",
-    "start": ".venv\\Scripts\\uvicorn.exe server:app --host 0.0.0.0 --port 8000"
+    "start": ".venv\\Scripts\\uvicorn.exe server:app --host 0.0.0.0 --port 8000",
+    "app": ".venv\\Scripts\\pythonw.exe desktop_app.py",
+    "tray": ".venv\\Scripts\\pythonw.exe desktop_launcher.py"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
