@@ -34,3 +34,7 @@ cookies.txt
 # Stray/scratch files
 txt
 
+# ignore logs
+logs/
+
+.vt-prod-state.json
