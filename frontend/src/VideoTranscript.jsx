@@ -42,6 +42,7 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
   const [showModelManager, setShowModelManager] = useState(false)
   const [modelDownloadProgress, setModelDownloadProgress] = useState({}) // { modelName: { percent, message } }
   const [showFfmpegHelper, setShowFfmpegHelper] = useState(false)
+  const [ffmpegInputName, setFfmpegInputName] = useState('')
   const [copiedPresetKey, setCopiedPresetKey] = useState(null)
   const [progressLog, setProgressLog] = useState([])
   const [loading, setLoading] = useState(false)
@@ -99,8 +100,11 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
   ]
 
   const renderFfmpegCmd = (cmd) => {
-    const inputName = uploadFile?.name || 'INPUT.mp4'
-    return cmd.replace('{INPUT}', inputName)
+    const inputName = ffmpegInputName.trim() || uploadFile?.name || 'INPUT.mp4'
+    const base = inputName.replace(/\.[^./\\]+$/, '') || 'output'
+    return cmd
+      .replace('{INPUT}', inputName)
+      .replace(/output\.(ogg|mp3)/, `${base}.$1`)
   }
 
   const copyFfmpegCmd = async (key, cmd) => {
@@ -452,11 +456,16 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
               {showFfmpegHelper && (
                 <div className="ffmpeg-helper-body">
                   <p className="ffmpeg-helper-intro">
-                    Run one of these in PowerShell / Terminal where your video lives, then upload the resulting audio file above.
-                    {uploadFile
-                      ? <> Commands below already use <code>{uploadFile.name}</code>.</>
-                      : <> Replace <code>INPUT.mp4</code> with your filename, or pick a file above to auto-fill it.</>}
+                    Type your video's file name below — every command updates instantly, so you can copy and run it directly in PowerShell / Terminal. Then upload the resulting audio file above.
                   </p>
+                  <input
+                    type="text"
+                    className="ffmpeg-input-name"
+                    placeholder={uploadFile?.name || 'INPUT.mp4'}
+                    value={ffmpegInputName}
+                    onChange={(e) => setFfmpegInputName(e.target.value)}
+                    aria-label="Input file name for FFmpeg commands"
+                  />
                   {FFMPEG_PRESETS.map((p) => (
                     <div key={p.key} className="ffmpeg-preset">
                       <div className="ffmpeg-preset-header">

@@ -945,6 +945,23 @@
   font-size: 0.78rem;
 }
 
+.ffmpeg-input-name {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 0.9rem;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.85rem;
+  font-family: 'Consolas', 'Monaco', monospace;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+.ffmpeg-input-name:focus {
+  outline: none;
+  border-color: #7c6cf0;
+  box-shadow: 0 0 0 2px rgba(124, 108, 240, 0.2);
+}
+
 .ffmpeg-preset {
   margin-bottom: 0.85rem;
   padding: 0.6rem 0.75rem;
