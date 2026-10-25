@@ -23,6 +23,7 @@ import FileCompare from './FileCompare'
 import SessionReader from './SessionReader'
 import SubtitleProcessor from './SubtitleProcessor'
 import TimezoneConverter from './TimezoneConverter'
+import RichTextToHtml from './RichTextToHtml'
 
 
 function App() {
@@ -216,6 +217,7 @@ function App() {
       {currentTool === 'sessionreader' && (<SessionReader token={token} onAuthError={handleLogout} />)}
       {currentTool === 'subtitle' && (<SubtitleProcessor token={token} onAuthError={handleLogout} />)}
       {currentTool === 'timezone' && (<TimezoneConverter token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'richtext2html' && (<RichTextToHtml />)}
 
       <GlobalQueue
         jobs={allJobs}

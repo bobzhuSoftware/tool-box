@@ -1,0 +1,133 @@
+/* --- Rich Text → HTML --- */
+
+.rt-intro {
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0 0 0.8rem;
+}
+
+.rt-intro kbd {
+  padding: 1px 5px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f7f7f7;
+  font-size: 0.8rem;
+}
+
+.rt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.8rem;
+}
+
+.rt-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.88rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.rt-error,
+.rt-warn {
+  margin: 0 0 0.6rem;
+  font-size: 0.85rem;
+}
+
+.rt-error { color: #c62828; }
+.rt-warn { color: #b26a00; }
+
+.rt-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 800px) {
+  .rt-panes { grid-template-columns: 1fr; }
+}
+
+.rt-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rt-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-height: 34px;
+  margin-bottom: 0.4rem;
+}
+
+.rt-pane-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #555;
+}
+
+.rt-tabs {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.rt-tabs button {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #555;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.rt-tabs button.active {
+  background: #646cff;
+  border-color: #646cff;
+  color: #fff;
+}
+
+.rt-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.rt-preview,
+.rt-placeholder,
+.rt-output {
+  height: 60vh;
+  min-height: 320px;
+  box-sizing: border-box;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.rt-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #999;
+  border-style: dashed;
+}
+
+.rt-output {
+  width: 100%;
+  padding: 0.7rem;
+  resize: vertical;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre;
+  overflow: auto;
+}
+
+.rt-output:focus {
+  outline: none;
+  border-color: #646cff;
+}

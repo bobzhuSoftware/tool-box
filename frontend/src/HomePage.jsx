@@ -150,6 +150,14 @@ function HomePage({ onSelectTool, token }) {
       tags: ['时区', 'Timezone', '会议'],
     },
     {
+      id: 'richtext2html',
+      icon: '🧬',
+      title: '富文本转 HTML',
+      description:
+        '复制任意富文本后在页面按 Ctrl+V，右侧直接显示剪贴板里的原始 HTML 源码，无需再到浏览器控制台注入监听代码。支持预览、美化缩进、复制与下载。',
+      tags: ['HTML', '剪贴板', '富文本'],
+    },
+    {
       id: 'sessionreader',
       icon: '📖',
       title: 'Copilot 会话阅读器',
