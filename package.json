@@ -5,7 +5,7 @@
   "scripts": {
     "install:frontend": "cd frontend && npm install",
     "setup": "python -m venv .venv && .venv\\Scripts\\python.exe -m pip install -r requirements.txt && npm run install:frontend",
-    "dev:backend": ".venv\\Scripts\\uvicorn.exe server:app --reload --reload-exclude .venv --host 0.0.0.0 --port 8000",
+    "dev:backend": ".venv\\Scripts\\uvicorn.exe server:app --reload --reload-exclude .venv --timeout-graceful-shutdown 5 --host 0.0.0.0 --port 8000",
     "dev:frontend": "cd frontend && npm run dev",
     "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
     "build": "cd frontend && npm run build",

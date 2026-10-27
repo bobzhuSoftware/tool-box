@@ -134,6 +134,7 @@ try {
   $uvicornArgs = @(
     '-m', 'uvicorn', 'server:app',
     '--host', '0.0.0.0',
+    '--timeout-graceful-shutdown', '5',
     '--port', "$Port"
   )
   if ($logFile) {

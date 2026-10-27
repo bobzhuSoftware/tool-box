@@ -100,7 +100,7 @@ $backendJob = Start-Job -Name 'backend-dev' -ScriptBlock {
   param([string]$Dir, [int]$Port, [string]$Python)
 
   Set-Location $Dir
-  & $Python -m uvicorn server:app --reload --reload-exclude ".venv" --host 0.0.0.0 --port $Port 2>&1 | ForEach-Object { $_.ToString() }
+  & $Python -m uvicorn server:app --reload --reload-exclude ".venv" --timeout-graceful-shutdown 5 --host 0.0.0.0 --port $Port 2>&1 | ForEach-Object { $_.ToString() }
 } -ArgumentList $scriptRoot, $BackendPort, $pythonExe
 
 Write-Host "Waiting for backend to be ready on port $BackendPort..."
