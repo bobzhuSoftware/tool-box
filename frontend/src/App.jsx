@@ -16,6 +16,7 @@ import BookConverter from './BookConverter'
 import WechatExport from './WechatExport'
 import DiscordExport from './DiscordExport'
 import ThreadsDownload from './ThreadsDownload'
+import ServiceNowTables from './ServiceNowTables'
 import AudioRecorder from './AudioRecorder'
 import ScreenRecorder from './ScreenRecorder'
 import ExcelSearch from './ExcelSearch'
@@ -210,6 +211,7 @@ function App() {
       {currentTool === 'wechat' && (<WechatExport token={token} onAuthError={handleLogout} />)}
       {currentTool === 'discord' && (<DiscordExport token={token} onAuthError={handleLogout} />)}
       {currentTool === 'threads' && (<ThreadsDownload token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'servicenow' && (<ServiceNowTables token={token} onAuthError={handleLogout} />)}
       {currentTool === 'audio' && (<AudioRecorder token={token} onAuthError={handleLogout} />)}
       {currentTool === 'screen' && (<ScreenRecorder token={token} onAuthError={handleLogout} />)}
       {currentTool === 'excelsearch' && (<ExcelSearch token={token} onAuthError={handleLogout} />)}

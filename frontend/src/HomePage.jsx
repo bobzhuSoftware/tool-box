@@ -108,6 +108,14 @@ function HomePage({ onSelectTool, token }) {
       tags: ['Threads', 'Video', 'Download'],
     },
     {
+      id: 'servicenow',
+      icon: '📊',
+      title: 'ServiceNow 数据表',
+      description:
+        '通过已登录的 Edge 会话读取 ServiceNow 列表的记录数，按行/列填入表格，一键刷新并复制。首次需在弹出的窗口中登录（含 2FA）。',
+      tags: ['ServiceNow', 'DSV', 'Table'],
+    },
+    {
       id: 'audio',
       icon: '🎙️',
       title: '全声道录音',

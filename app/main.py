@@ -22,6 +22,7 @@ from app.routers.home_layout import router as home_layout_router
 from app.routers.pdf import router as pdf_router
 from app.routers.profiles import router as profiles_router
 from app.routers.screen import router as screen_router
+from app.routers.servicenow import router as servicenow_router
 from app.routers.sessions import router as sessions_router
 from app.routers.subtitle import router as subtitle_router
 from app.routers.teams_chat import router as teams_chat_router
@@ -49,6 +50,7 @@ app.include_router(home_layout_router)
 app.include_router(pdf_router)
 app.include_router(profiles_router)
 app.include_router(screen_router)
+app.include_router(servicenow_router)
 app.include_router(sessions_router)
 app.include_router(subtitle_router)
 app.include_router(teams_chat_router)

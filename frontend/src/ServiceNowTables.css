@@ -1,0 +1,24 @@
+.sn-tabs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.8rem; }
+.sn-tab { padding: 0.35rem 0.9rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.9rem; }
+.sn-tab.active { background: #646cff; border-color: #646cff; color: #fff; }
+
+.sn-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 0.8rem; }
+.sn-btn { padding: 0.5rem 1.4rem; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; }
+.sn-btn:disabled { opacity: 0.6; cursor: default; }
+.sn-danger { color: #c62828 !important; border-color: #c62828 !important; }
+.sn-updated { color: #777; font-size: 0.85rem; }
+.sn-edit-title { margin-bottom: 0.6rem; font-size: 0.9rem; }
+.sn-edit-title input { margin-left: 0.4rem; padding: 0.25rem 0.5rem; }
+.sn-notice { color: #555; font-size: 0.9rem; margin-top: 0.6rem; }
+
+.sn-table-wrap { overflow-x: auto; }
+.sn-table { border-collapse: collapse; background: #fff; color: #111; font-size: 1rem; }
+.sn-table th, .sn-table td { border: 1px solid #333; padding: 0.35rem 0.9rem; text-align: left; min-width: 4rem; }
+.sn-table th { font-weight: 700; }
+.sn-table td { font-weight: 400; }
+.sn-cell-error { color: #c62828; cursor: help; }
+
+.sn-head-edit { display: flex; gap: 0.2rem; }
+.sn-head-edit input { min-width: 7rem; padding: 0.2rem 0.4rem; }
+.sn-head-edit button, .sn-add { border: 1px solid #ccc; background: #fafafa; border-radius: 4px; cursor: pointer; padding: 0.1rem 0.5rem; }
+.sn-url-input { width: 16rem; padding: 0.2rem 0.4rem; font-size: 0.8rem; }
