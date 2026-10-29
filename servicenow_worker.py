@@ -17,7 +17,8 @@ Progress is written to stdout as:
     STATUS:<message>
     STAGE:check|window|working             (check: silent check of the saved login; window: user must
                                             sign in in the visible Edge window; working: signed in)
-    RESULT:{"url","count","source"}        (count: one per URL, as soon as it is read)
+    RESULT:{"url","count","source"[,"unconfirmed"]}   (count: one per URL, as soon as it is read;
+                                            unconfirmed: REST said 0 and the page could not confirm it)
     IDENTITY:{"user_name","display_name"}  (who the session is logged in as)
     DONE:{...}                             (count: {"results":[...]}; login: {"user_name",...})
     ERROR:<message>
@@ -30,7 +31,7 @@ import re
 import shutil
 import sys
 import time
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
@@ -64,18 +65,43 @@ def done(data: dict) -> None:
     print(f"DONE:{json.dumps(data, ensure_ascii=False)}", flush=True)
 
 
+def _classic_target(url: str) -> str:
+    """Return '<table>_list.do[?params]' from a classic list URL, or ''.
+
+    Handles /now/nav/ui/classic/params/target/<double-encoded target>, nav_to.do?uri=..., and
+    a direct https://host/<table>_list.do?sysparm_query=... link.
+    """
+    p = urlparse(url)
+    m = re.search(r"/target/(.+)$", unquote(p.path))
+    if m:
+        return m.group(1)
+    if p.path.endswith("/nav_to.do"):
+        return parse_qs(p.query).get("uri", [""])[0]
+    if re.search(r"[^/]+_list\.do$", p.path):
+        return p.path.rsplit("/", 1)[1] + (f"?{p.query}" if p.query else "")
+    return ""
+
+
 def parse_list_url(url: str) -> dict:
-    """Extract table / encoded query / list title from a Next Experience simplelist URL."""
+    """Extract table / encoded query / list title from a Next Experience simplelist URL or a
+    classic list URL (<table>_list.do?sysparm_query=...)."""
     path = urlparse(url).path
     m = re.search(r"/simplelist/([^/]+)", path)
-    table = m.group(1) if m else ""
-    q = re.search(r"/query/(.+)$", path)
-    t = re.search(r"/list-title/([^/]+)", path)
-    return {
-        "table": table,
-        "query": unquote(q.group(1)) if q else "",
-        "title": unquote(t.group(1)) if t else "",
-    }
+    if m:
+        q = re.search(r"/query/(.+)$", path)
+        t = re.search(r"/list-title/([^/]+)", path)
+        return {
+            "table": m.group(1),
+            "query": unquote(q.group(1)) if q else "",
+            "title": unquote(t.group(1)) if t else "",
+        }
+
+    target = _classic_target(url)
+    tm = re.match(r"/?([A-Za-z0-9_]+)_list\.do(?:\?(.*))?$", target)
+    if tm:
+        query = parse_qs(tm.group(2) or "").get("sysparm_query", [""])[0]
+        return {"table": tm.group(1), "query": query, "title": ""}
+    return {"table": "", "query": "", "title": ""}
 
 
 def _on_servicenow(url: str) -> bool:
@@ -104,6 +130,18 @@ _JS_IDENTITY = """async (token) => {
     if (!r.ok) return null;
     const u = (await r.json()).result || {};
     return {user_name: u.user_name || '', display_name: u.user_display_name || ''};
+}"""
+
+# Classic list (inside the gsft_main frame): the list table carries the total row count.
+_JS_CLASSIC = """() => {
+    const t = document.querySelector('table[grand_total_rows]');
+    if (t) {
+        const n = parseInt(t.getAttribute('grand_total_rows'), 10);
+        if (!isNaN(n)) return n;
+    }
+    const m = document.body && document.body.innerText.match(/\\d[\\d,]*\\s*to\\s*\\d[\\d,]*\\s*of\\s*([\\d,]+)/i);
+    if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+    return null;
 }"""
 
 # Fallback: find the count badge after the list title, piercing shadow roots.
@@ -309,38 +347,106 @@ async def _ensure_login(p, automation_dir: str, first_url: str):
     return ctx, page, holder
 
 
+async def _capture_list_count(resp, captured: list) -> None:
+    """Record the total of every Next Experience list the page loads.
+
+    The list loads through GraphQL (operation nowRecordListConnected); layoutQuery.count is the
+    number the page shows, and it honours conditions the REST stats API cannot read (e.g. sys_tags).
+    """
+    if "/api/now/graphql" not in resp.url:
+        return
+    try:
+        req = json.loads(resp.request.post_data or "")
+        body = await resp.json()
+        reqs = req if isinstance(req, list) else [req]
+        bodies = body if isinstance(body, list) else [body]
+        for rq, bd in zip(reqs, bodies):
+            if rq.get("operationName") != "nowRecordListConnected":
+                continue
+            count = bd["data"]["GlideListLayout_Query"]["getListLayout"]["layoutQuery"]["count"]
+            variables = rq.get("variables") or {}
+            captured.append({"table": variables.get("table"), "query": variables.get("query") or "", "count": int(count)})
+    except Exception:
+        return
+
+
 async def _count_one(page, holder: dict, url: str) -> dict:
     info = parse_list_url(url)
     if not info["table"]:
-        return {"url": url, "count": None, "source": None, "error": "URL 不是 simplelist 格式，无法解析表名"}
+        return {"url": url, "count": None, "source": None, "error": "URL 无法解析表名（需要 simplelist 或经典 _list.do 链接）"}
 
+    captured: list = []
+    handler = None
+    if info["title"]:
+        handler = lambda r: asyncio.create_task(_capture_list_count(r, captured))  # noqa: E731
+        page.on("response", handler)
+    try:
+        return await _count_page(page, holder, url, info, captured)
+    finally:
+        if handler:
+            page.remove_listener("response", handler)
+
+
+async def _count_page(page, holder: dict, url: str, info: dict, captured: list) -> dict:
     await _open(page, url)
     if not await _wait_servicenow(page, 60):
         return {"url": url, "count": None, "source": None, "error": "未能进入 ServiceNow 页面（可能需要重新登录）"}
 
     token = await _get_token(page, holder)
 
+    rest_count = None
+    rest_err = ""
     try:
         res = await page.evaluate(
             _JS_STATS, {"table": info["table"], "query": info["query"], "token": token}
         )
         if res["status"] == 200:
-            count = int(json.loads(res["text"])["result"]["stats"]["count"])
-            return {"url": url, "count": count, "source": "rest"}
-        status(f"REST 统计接口返回 {res['status']}，改用页面读取…")
+            rest_count = int(json.loads(res["text"])["result"]["stats"]["count"])
+            if rest_count > 0:
+                return {"url": url, "count": rest_count, "source": "rest"}
+            # The stats API silently returns 0 when the query uses a field the API user can't read
+            # (e.g. sys_tags), so a 0 is re-checked against what the page itself shows.
+            status("REST 返回 0，用页面再确认…")
+        else:
+            status(f"REST 统计接口返回 {res['status']}，改用页面读取…")
+            rest_err = f"REST 返回 {res['status']}"
     except Exception as e:
         status(f"REST 统计失败（{e}），改用页面读取…")
+        rest_err = f"REST 失败：{e}"
 
-    # DOM fallback: wait for the badge to render.
-    for _ in range(30):
+    n = await _read_page_count(page, info, captured, tries=30 if rest_count is None else 15)
+    if n is not None:
+        return {"url": url, "count": n, "source": "dom"}
+    if rest_count is not None:
+        # A REST 0 the page could not confirm may be wrong (e.g. an unreadable sys_tags condition).
+        return {"url": url, "count": rest_count, "source": "rest", "unconfirmed": rest_count == 0}
+    return {"url": url, "count": None, "source": None, "error": rest_err or "无法读取数量"}
+
+
+async def _read_page_count(page, info: dict, captured: list, tries: int):
+    """Read the count the page itself shows: classic lists (no title) via the gsft_main frame;
+    Next Experience lists from the page's own GraphQL response, else the badge next to the title."""
+    for _ in range(tries):
+        n = None
         try:
-            n = await page.evaluate(_JS_DOM, info["title"])
+            if info["title"]:
+                same_table = [c for c in captured if c["table"] == info["table"]]
+                exact = [c for c in same_table if c["query"] == info["query"]]
+                if exact or same_table:
+                    return (exact or same_table)[-1]["count"]
+                n = await page.evaluate(_JS_DOM, info["title"])
+            else:
+                for fr in page.frames:
+                    if fr.name == "gsft_main" or "_list.do" in fr.url:
+                        n = await fr.evaluate(_JS_CLASSIC)
+                        if n is not None:
+                            break
         except Exception:
             n = None
         if n is not None:
-            return {"url": url, "count": n, "source": "dom"}
+            return n
         await asyncio.sleep(1)
-    return {"url": url, "count": None, "source": None, "error": "无法读取数量"}
+    return None
 
 
 async def cmd_count(urls: list[str]) -> None:

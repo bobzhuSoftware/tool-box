@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useSSEStream from './useSSEStream'
+import ServiceNowLinks from './ServiceNowLinks'
+import LinkCellInput from './LinkCellInput'
+import useSnLinks, { REF_PREFIX } from './useSnLinks'
+import { parseFormula, evaluateFormula, formulaMentions } from './formula'
 import './ServiceNowTables.css'
 
 const emptyCounts = { values: {}, at: null }
@@ -31,7 +35,20 @@ const removeIndex = (cells, axis, idx) => {
   return out
 }
 
-// Mirrors the server rule (https://*.service-now.com) plus the simplelist form the worker can parse.
+// Same re-indexing for total rows/columns: a total on `axis` is keyed and lists members on that axis.
+const removeSumIndex = (sums, axis, idx) => {
+  const shift = (i) => (i > idx ? i - 1 : i)
+  const out = {}
+  for (const [key, members] of Object.entries(sums)) {
+    if (key[0] !== axis) { out[key] = members; continue }
+    const n = Number(key.slice(1))
+    if (n === idx) continue
+    out[`${axis}${shift(n)}`] = members.filter((i) => i !== idx).map(shift)
+  }
+  return out
+}
+
+// Mirrors the server rule (https://*.service-now.com) plus the list forms the worker can parse.
 const urlProblem = (url) => {
   const u = url.trim()
   if (!u) return ''
@@ -45,11 +62,16 @@ const urlProblem = (url) => {
   if (parsed.protocol !== 'https:' || !(host === 'service-now.com' || host.endsWith('.service-now.com'))) {
     return '只支持 https://*.service-now.com 的链接'
   }
-  if (!parsed.pathname.includes('/simplelist/')) return '不是 simplelist 列表链接'
+  const isList = parsed.pathname.includes('/simplelist/') || /_list\.do/i.test(`${parsed.pathname}${parsed.search}`)
+  if (!isList) return '不是 simplelist 或经典 _list.do 列表链接'
   return ''
 }
 
 const shortError = (s) => (s.length > 16 ? `${s.slice(0, 16)}…` : s)
+
+const SOURCE_NAMES = { rest: 'REST 接口', dom: '页面' }
+const sourceSuffix = (source) => (SOURCE_NAMES[source] ? `（${SOURCE_NAMES[source]}）` : '')
+const UNCONFIRMED_HINT = 'REST 返回 0，页面未能确认，数字可能不准，请在 ServiceNow 里核对'
 
 const formatUpdated = (iso) => {
   const d = new Date(iso)
@@ -127,6 +149,8 @@ function ServiceNowTables({ token, onAuthError }) {
   const [loginResult, setLoginResult] = useState(null) // { ok, text } shown after login/check
   const [saveState, setSaveState] = useState('idle') // 'idle' | 'pending' | 'saving' | 'saved' | 'error'
   const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
+  const linksStore = useSnLinks(token, onAuthError)
+  const { links: savedLinks, loaded: linksLoaded, loadError: linksError } = linksStore
 
   const saver = useRef({ timer: null, latest: null, running: false })
   const tokenRef = useRef(token)
@@ -256,6 +280,56 @@ function ServiceNowTables({ token, onAuthError }) {
 
   const table = useMemo(() => tables.find((t) => t.id === activeId) || null, [tables, activeId])
   const account = useMemo(() => accounts.find((a) => a.id === accId) || null, [accounts, accId])
+  const sums = table?.sums || {}
+  const isSum = (axis, idx) => `${axis}${idx}` in sums
+
+  // A cell value is a plain URL or "ref:<id>" of a saved link. Resolves to the URL to use:
+  // { url } normally, { loading } while the saved links load, { error } if the link is unavailable.
+  const resolveCell = (raw) => {
+    const v = (raw || '').trim()
+    if (!v.startsWith(REF_PREFIX)) return { url: v }
+    if (linksError) return { url: '', error: '无法加载常用链接' }
+    if (!linksLoaded) return { url: '', loading: true }
+    const link = savedLinks.find((l) => l.id === v.slice(REF_PREFIX.length))
+    return link ? { url: link.url.trim() } : { url: '', error: '引用的常用链接已删除' }
+  }
+
+  const cellProblem = (raw) => {
+    const v = (raw || '').trim()
+    if (v.startsWith('=')) return resolveFormula(v).error || ''
+    const r = resolveCell(v)
+    return r.error || (r.loading ? '' : urlProblem(r.url))
+  }
+
+  // A formula cell: "=[PB]+[PR]". Yields { parsed, vars: {alias -> url} }, { loading }, or { error }.
+  const resolveFormula = (raw) => {
+    const parsed = parseFormula(raw.trim().slice(1))
+    if (parsed.error) return { error: parsed.error }
+    if (linksError) return { error: '无法加载常用链接' }
+    if (!linksLoaded) return { loading: true }
+    const vars = {}
+    for (const key of parsed.aliases) {
+      const link = savedLinks.find((l) => (l.alias || '').toLowerCase() === key)
+      if (!link) return { error: `找不到缩写 [${key}]，请在常用链接里设置` }
+      const problem = urlProblem(link.url.trim())
+      if (problem) return { error: `[${link.alias}]：${problem}` }
+      vars[key] = { url: link.url.trim(), alias: link.alias }
+    }
+    return { parsed, vars }
+  }
+
+  // Cells depending on a saved link: pointing at it directly, or using its alias in a formula.
+  const linkUsage = (link) => {
+    let refs = 0
+    let formulas = 0
+    for (const t of tables) {
+      for (const raw of Object.values(t.cells)) {
+        if (raw === `${REF_PREFIX}${link.id}`) refs += 1
+        else if (raw.trim().startsWith('=') && formulaMentions(raw, link.alias)) formulas += 1
+      }
+    }
+    return { refs, formulas }
+  }
 
   // ---- table layout editing ----
   const updateTable = (patch) => {
@@ -299,6 +373,7 @@ function ServiceNowTables({ token, onAuthError }) {
       rows: [...table.rows],
       cols: [...table.cols],
       cells: { ...table.cells },
+      sums: Object.fromEntries(Object.entries(sums).map(([k, v]) => [k, [...v]])),
     }
     applyTables([...tables, copy])
     setEditing(false)
@@ -333,7 +408,25 @@ function ServiceNowTables({ token, onAuthError }) {
     updateTable({
       [key]: table[key].filter((_, i) => i !== idx),
       cells: removeIndex(table.cells, axis, idx),
+      sums: removeSumIndex(sums, axis, idx),
     })
+  }
+
+  // A total row/column is an ordinary row/column that adds up the chosen rows/columns of its axis.
+  const addSum = (axis) => {
+    const key = axis === 'r' ? 'rows' : 'cols'
+    const members = table[key].map((_, i) => i).filter((i) => !isSum(axis, i))
+    updateTable({
+      [key]: [...table[key], '合计'],
+      sums: { ...sums, [`${axis}${table[key].length}`]: members },
+    })
+  }
+
+  const toggleSum = (axis, idx, member) => {
+    const key = `${axis}${idx}`
+    const cur = sums[key] || []
+    const next = cur.includes(member) ? cur.filter((i) => i !== member) : [...cur, member].sort((a, b) => a - b)
+    updateTable({ sums: { ...sums, [key]: next } })
   }
 
   const setCellUrl = (r, c, url) => {
@@ -411,18 +504,30 @@ function ServiceNowTables({ token, onAuthError }) {
     } catch { /* keep current state */ }
   }
 
+  // URLs a cell needs counts for: its own URL/reference, or every link a formula uses.
+  const cellUrls = (raw) => {
+    if (raw.trim().startsWith('=')) return Object.values(resolveFormula(raw).vars || {}).map((v) => v.url)
+    return [resolveCell(raw).url].filter(Boolean)
+  }
+
   const tableUrls = table
-    ? [...new Set(Object.values(table.cells).map((u) => u.trim()).filter(Boolean))]
+    ? [...new Set(Object.values(table.cells).flatMap(cellUrls))]
     : []
   const failedUrls = tableUrls.filter((u) => !urlProblem(u) && counts.values[u]?.error)
 
   const refresh = async (onlyFailed = false) => {
     if (!table) return
+    const cellValues = Object.values(table.cells).filter((raw) => raw.trim())
+    if (!cellValues.length) { setNotice('这个表格还没有配置任何单元格链接'); return }
+    if (!linksLoaded && cellValues.some((raw) => /^(=|ref:)/.test(raw.trim())) && !linksError) {
+      setNotice('常用链接还在加载，请稍后再试')
+      return
+    }
     const valid = tableUrls.filter((u) => !urlProblem(u))
     const urls = onlyFailed ? failedUrls : valid
-    if (!tableUrls.length) { setNotice('这个表格还没有配置任何单元格链接'); return }
     if (!urls.length) { setNotice('链接格式不正确，请先修正标红的单元格'); return }
-    setNotice(valid.length < tableUrls.length ? '已跳过格式不正确的链接' : '')
+    const skipped = cellValues.filter((raw) => cellProblem(raw)).length
+    setNotice(skipped ? '已跳过格式不正确或已失效的链接' : '')
     setLoginResult(null)
     setEditing(false)
     setPending(new Set(urls))
@@ -443,11 +548,11 @@ function ServiceNowTables({ token, onAuthError }) {
           onAuthError,
           onEvent: (event) => {
             if (event.type === 'result') {
-              const { url, count, error } = event.data
+              const { url, count, error, source, unconfirmed } = event.data
               setPending((prev) => { const n = new Set(prev); n.delete(url); return n })
               setCounts((prev) => {
                 const next = {
-                  values: { ...prev.values, [url]: error ? { error } : { count } },
+                  values: { ...prev.values, [url]: error ? { error } : { count, source, unconfirmed: !!unconfirmed } },
                   at: new Date().toISOString(),
                 }
                 localStorage.setItem(countsKey(runAcc), JSON.stringify(next))
@@ -476,14 +581,88 @@ function ServiceNowTables({ token, onAuthError }) {
     }
   }
 
-  const cellInfo = (url) => {
-    if (!url) return { kind: 'empty', text: '' }
-    const problem = urlProblem(url)
+  // Sum of the formula's variables. Variables without data count as 0 and make the result partial (⚠),
+  // the same way incomplete totals behave. An unconfirmed 0 counts as missing too.
+  const formulaInfo = (raw) => {
+    const f = resolveFormula(raw)
+    const entries = Object.entries(f.vars || {})
+    if (f.loading || entries.some(([, v]) => pending.has(v.url))) return { kind: 'pending', text: '…' }
+    const failures = {}
+    const { total, missing } = evaluateFormula(f.parsed.ast, (key) => {
+      const v = counts.values[f.vars[key].url]
+      if (!v || v.error) { failures[key] = v?.error || '尚未读取'; return null }
+      if (v.unconfirmed) { failures[key] = UNCONFIRMED_HINT; return null }
+      return v.count
+    })
+    const expr = raw.trim()
+    if (missing.length === entries.length && entries.length) {
+      return { kind: 'none', text: '—', title: `${expr}\n还没有数据` }
+    }
+    if (missing.length) {
+      const detail = missing.map((a) => `[${a}]：${failures[a.toLowerCase()]}`).join('\n')
+      return { kind: 'partial', text: `${total} ⚠`, title: `${expr}\n结果不完整，缺少：\n${detail}` }
+    }
+    const values = entries
+      .map(([, v]) => `[${v.alias}] = ${counts.values[v.url].count}${sourceSuffix(counts.values[v.url].source)}`)
+      .join('\n')
+    return { kind: 'count', text: String(total), value: total, title: values ? `${expr}\n${values}` : expr }
+  }
+
+  // `raw` is the stored cell value; returns what to show and, for counts, the URL to open.
+  const cellInfo = (raw) => {
+    if (!raw?.trim()) return { kind: 'empty', text: '' }
+    const problem = cellProblem(raw)
     if (problem) return { kind: 'error', text: problem }
-    if (pending.has(url)) return { kind: 'pending', text: '…' }
+    if (raw.trim().startsWith('=')) return formulaInfo(raw)
+    const { url, loading: resolving } = resolveCell(raw)
+    if (resolving || pending.has(url)) return { kind: 'pending', text: '…' }
     const v = counts.values[url]
-    if (!v) return { kind: 'none', text: '—' }
-    return v.error ? { kind: 'error', text: v.error } : { kind: 'count', text: String(v.count) }
+    if (!v) return { kind: 'none', text: '—', url }
+    if (v.error) return { kind: 'error', text: v.error }
+    if (v.unconfirmed) return { kind: 'unconfirmed', text: `${v.count} ⚠`, value: v.count, url, title: UNCONFIRMED_HINT }
+    return { kind: 'count', text: String(v.count), value: v.count, url, title: `数据来源${sourceSuffix(v.source) || '：未知'}` }
+  }
+
+  // Total cell for (r, c), or null for an ordinary cell. The crossing of a total row and total
+  // column is left blank. Incomplete totals keep the partial sum with a ⚠ marker (`partial`).
+  const sumCellInfo = (r, c) => {
+    const rowSum = isSum('r', r)
+    const colSum = isSum('c', c)
+    if (!rowSum && !colSum) return null
+    if (rowSum && colSum) return { kind: 'sum', text: '', partial: false }
+    const refs = colSum
+      ? (sums[`c${c}`] || []).map((m) => cellKey(r, m))
+      : (sums[`r${r}`] || []).map((m) => cellKey(m, c))
+    let total = 0
+    let counted = 0
+    let missing = 0
+    for (const k of refs) {
+      const url = table.cells[k]
+      if (!url?.trim()) continue
+      const info = cellInfo(url)
+      if (info.kind === 'count') { total += info.value; counted += 1 } else missing += 1
+    }
+    if (!counted && !missing) return { kind: 'sum', text: '', partial: false }
+    if (!counted) return { kind: 'sum', text: '—', partial: true, title: '汇总的单元格还没有数据' }
+    if (missing) return { kind: 'sum', text: `${total} ⚠`, partial: true, title: `有 ${missing} 个汇总的单元格没有数据，合计不完整` }
+    return { kind: 'sum', text: String(total), partial: false }
+  }
+
+  // Checkbox list (edit mode) choosing which rows/columns a total adds up.
+  const sumPicker = (axis, idx) => {
+    const names = axis === 'r' ? table.rows : table.cols
+    const members = sums[`${axis}${idx}`] || []
+    return (
+      <div className="sn-sum-pick">
+        <span>汇总：</span>
+        {names.map((name, i) => (isSum(axis, i) ? null : (
+          <label key={i}>
+            <input type="checkbox" checked={members.includes(i)} onChange={() => toggleSum(axis, idx, i)} />
+            {name}
+          </label>
+        )))}
+      </div>
+    )
   }
 
   const copyResults = async () => {
@@ -492,9 +671,14 @@ function ServiceNowTables({ token, onAuthError }) {
       const info = cellInfo(url)
       return info.kind === 'count' ? info.text : ''
     }
+    const cellText = (r, c) => {
+      const s = sumCellInfo(r, c)
+      if (s) return s.partial ? '' : s.text
+      return val(table.cells[cellKey(r, c)])
+    }
     const grid = [
       [table.title, ...table.cols],
-      ...table.rows.map((row, r) => [row, ...table.cols.map((_, c) => val(table.cells[cellKey(r, c)]))]),
+      ...table.rows.map((row, r) => [row, ...table.cols.map((_, c) => cellText(r, c))]),
     ]
 
     const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -573,10 +757,10 @@ function ServiceNowTables({ token, onAuthError }) {
   const logHasError = progressLog.some((e) => e.type === 'error')
 
   return (
-    <>
+    <div className="sn-page">
       <h2 className="tool-page-title">📊 ServiceNow 数据表</h2>
 
-      <div className="input-section">
+      <div className="input-section sn-main">
         <p className="tool-description">每个单元格对应一个 ServiceNow 列表链接，刷新时读取该列表的记录数。</p>
 
         <div className="sn-account-bar">
@@ -670,7 +854,11 @@ function ServiceNowTables({ token, onAuthError }) {
               {notice && <span className="sn-notice-inline">{notice}</span>}
             </div>
 
-            {editing && <p className="sn-hint">直接修改表格标题、行名、列名和链接，改动会自动保存。</p>}
+            {editing && (
+              <p className="sn-hint">
+                直接修改表格标题、行名、列名和链接，改动会自动保存。单元格也可以填公式，如 =[PB]+[PR]（[缩写] 在常用链接里设置，输入 [ 可选择）。
+              </p>
+            )}
 
             <div className="sn-table-wrap">
               <table className="sn-table">
@@ -688,14 +876,22 @@ function ServiceNowTables({ token, onAuthError }) {
                     {table.cols.map((col, c) => (
                       <th key={c}>
                         {editing ? (
-                          <div className="sn-head-edit">
-                            <input value={col} onChange={(e) => setHeader('c', c, e.target.value)} />
-                            <button title="删除此列" onClick={() => removeAxis('c', c)}>✕</button>
-                          </div>
+                          <>
+                            <div className="sn-head-edit">
+                              <input value={col} onChange={(e) => setHeader('c', c, e.target.value)} />
+                              <button title="删除此列" onClick={() => removeAxis('c', c)}>✕</button>
+                            </div>
+                            {isSum('c', c) && sumPicker('c', c)}
+                          </>
                         ) : col}
                       </th>
                     ))}
-                    {editing && <th><button className="sn-add" onClick={() => addAxis('c')}>＋ 列</button></th>}
+                    {editing && (
+                      <th>
+                        <button className="sn-add" onClick={() => addAxis('c')}>＋ 列</button>{' '}
+                        <button className="sn-add" onClick={() => addSum('c')}>＋ 合计列</button>
+                      </th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -703,33 +899,55 @@ function ServiceNowTables({ token, onAuthError }) {
                     <tr key={r}>
                       <th>
                         {editing ? (
-                          <div className="sn-head-edit">
-                            <input value={row} onChange={(e) => setHeader('r', r, e.target.value)} />
-                            <button title="删除此行" onClick={() => removeAxis('r', r)}>✕</button>
-                          </div>
+                          <>
+                            <div className="sn-head-edit">
+                              <input value={row} onChange={(e) => setHeader('r', r, e.target.value)} />
+                              <button title="删除此行" onClick={() => removeAxis('r', r)}>✕</button>
+                            </div>
+                            {isSum('r', r) && sumPicker('r', r)}
+                          </>
                         ) : row}
                       </th>
                       {table.cols.map((_, c) => {
-                        const url = table.cells[cellKey(r, c)] || ''
-                        const info = cellInfo(url)
-                        const problem = urlProblem(url)
+                        const sumInfo = sumCellInfo(r, c)
+                        if (sumInfo) {
+                          return (
+                            <td key={c} className="sn-sum-cell" title={sumInfo.title}>
+                              {sumInfo.text}
+                            </td>
+                          )
+                        }
+                        const raw = table.cells[cellKey(r, c)] || ''
+                        const info = cellInfo(raw)
+                        const problem = cellProblem(raw)
                         return (
-                          <td key={c} className={info.kind === 'error' && !editing ? 'sn-cell-error' : ''}>
+                          <td
+                            key={c}
+                            className={
+                              info.kind === 'error' && !editing ? 'sn-cell-error'
+                                : info.kind === 'unconfirmed' && !editing ? 'sn-cell-warn' : ''
+                            }
+                          >
                             {editing ? (
-                              <input
-                                className={`sn-url-input ${problem ? 'sn-url-invalid' : ''}`}
-                                placeholder="ServiceNow 列表链接"
-                                title={problem}
-                                value={url}
-                                onChange={(e) => setCellUrl(r, c, e.target.value)}
+                              <LinkCellInput
+                                value={raw}
+                                links={savedLinks}
+                                ready={linksLoaded}
+                                problem={problem}
+                                onChange={(v) => setCellUrl(r, c, v)}
                               />
-                            ) : info.kind === 'count' ? (
-                              <a href={url.trim()} target="_blank" rel="noopener noreferrer" title="在 ServiceNow 中打开">
+                            ) : (info.kind === 'count' || info.kind === 'unconfirmed') && info.url ? (
+                              <a
+                                href={info.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title={`在 ServiceNow 中打开\n${info.title}`}
+                              >
                                 {info.text}
                               </a>
                             ) : info.kind === 'error' ? (
                               <span title={info.text}>⚠ {shortError(info.text)}</span>
-                            ) : info.text}
+                            ) : <span title={info.title}>{info.text}</span>}
                           </td>
                         )
                       })}
@@ -737,7 +955,10 @@ function ServiceNowTables({ token, onAuthError }) {
                   ))}
                   {editing && (
                     <tr>
-                      <th><button className="sn-add" onClick={() => addAxis('r')}>＋ 行</button></th>
+                      <th>
+                        <button className="sn-add" onClick={() => addAxis('r')}>＋ 行</button>{' '}
+                        <button className="sn-add" onClick={() => addSum('r')}>＋ 合计行</button>
+                      </th>
                     </tr>
                   )}
                 </tbody>
@@ -746,6 +967,8 @@ function ServiceNowTables({ token, onAuthError }) {
           </>
         )}
       </div>
+
+      <ServiceNowLinks store={linksStore} usageCount={linkUsage} />
 
       {progressLog.length > 0 && (
         <details className="progress-section sn-log" open={logHasError || undefined}>
@@ -757,7 +980,7 @@ function ServiceNowTables({ token, onAuthError }) {
           </div>
         </details>
       )}
-    </>
+    </div>
   )
 }
 

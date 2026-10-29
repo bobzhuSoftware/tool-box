@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import uuid
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.core import sn_query
 from app.core.auth import require_user
 from app.core.db import User, engine
 from app.core.settings import _get_user_setting, _set_user_setting
@@ -26,6 +28,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
 _SETTING_KEY = "servicenow_tables"
 _ACCOUNTS_KEY = "servicenow_accounts"
+_LINKS_KEY = "servicenow_links"
+_CONDITION_NAMES_KEY = "servicenow_condition_names"
+_MAX_CONDITION_NAMES = 500
+_MAX_BUILD_CONDITIONS = 60
+_MAX_LINKS = 200
+_ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,19}$")
 _MAX_URLS = 200
 _DEFAULT_ACCOUNT_ID = "default"
 _ACCOUNT_ID_RE = re.compile(r"^[a-z0-9]{1,16}$")
@@ -54,6 +62,8 @@ class SnTable(BaseModel):
     cols: list[str] = []
     # "<row>,<col>" -> ServiceNow list URL
     cells: dict[str, str] = {}
+    # "c<idx>" / "r<idx>" -> indices of the columns / rows that total column / row adds up
+    sums: dict[str, list[int]] = {}
 
 
 class SnConfig(BaseModel):
@@ -95,6 +105,193 @@ def get_config(user: User = Depends(require_user)) -> SnConfig:
 def save_config(cfg: SnConfig, user: User = Depends(require_user)) -> SnConfig:
     _set_user_setting(user.id, _SETTING_KEY, cfg.model_dump_json())
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Saved links: a per-user bookmark list of pre-filtered ServiceNow URLs
+# ---------------------------------------------------------------------------
+class SnLink(BaseModel):
+    id: str
+    name: str = ""
+    url: str
+    note: str = ""
+    # Short name used as [alias] in cell formulas.
+    alias: str = ""
+
+
+class SnLinks(BaseModel):
+    links: list[SnLink] = []
+
+
+@router.get("/api/servicenow/links")
+def get_links(user: User = Depends(require_user)) -> SnLinks:
+    raw = _get_user_setting(user.id, _LINKS_KEY)
+    if not raw:
+        return SnLinks()
+    try:
+        return SnLinks(**json.loads(raw))
+    except (TypeError, ValueError):
+        return SnLinks()
+
+
+@router.post("/api/servicenow/links")
+def save_links(body: SnLinks, user: User = Depends(require_user)) -> SnLinks:
+    if len(body.links) > _MAX_LINKS:
+        raise HTTPException(status_code=400, detail=f"最多保存 {_MAX_LINKS} 条链接")
+    cleaned: list[SnLink] = []
+    seen_aliases: set[str] = set()
+    for link in body.links:
+        url = link.url.strip()
+        if len(url) > 4000 or not _is_servicenow_url(url):
+            raise HTTPException(status_code=400, detail="只支持 https://*.service-now.com 的链接")
+        alias = link.alias.strip()
+        if alias:
+            if not _ALIAS_RE.match(alias):
+                raise HTTPException(
+                    status_code=400, detail="缩写只能包含字母、数字、下划线，不能以数字开头，最长 20 个字符"
+                )
+            if alias.lower() in seen_aliases:
+                raise HTTPException(status_code=400, detail=f"缩写「{alias}」重复")
+            seen_aliases.add(alias.lower())
+        cleaned.append(
+            SnLink(
+                id=link.id[:36],
+                name=link.name.strip()[:100],
+                url=url,
+                note=link.note.strip()[:500],
+                alias=alias,
+            )
+        )
+    result = SnLinks(links=cleaned)
+    _set_user_setting(user.id, _LINKS_KEY, result.model_dump_json())
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Condition composer: split saved links into condition fragments and recombine them
+# ---------------------------------------------------------------------------
+def _condition_names(user_id: str) -> dict[str, str]:
+    raw = _get_user_setting(user_id, _CONDITION_NAMES_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+class SnCondition(BaseModel):
+    raw: str
+    label: str
+    field: str
+    op: str
+    value: str
+    custom: bool = False
+
+
+class SnLinkConditions(BaseModel):
+    id: str
+    name: str
+    kind: str = ""
+    table: str = ""
+    title: str = ""
+    conditions: list[SnCondition] = []
+    # Why the link can't be split (e.g. it uses ^NQ); empty when it can.
+    unsupported: str = ""
+
+
+class SnConditionsResponse(BaseModel):
+    links: list[SnLinkConditions] = []
+
+
+@router.get("/api/servicenow/links/conditions")
+def get_link_conditions(user: User = Depends(require_user)) -> SnConditionsResponse:
+    names = _condition_names(user.id)
+    out: list[SnLinkConditions] = []
+    for link in get_links(user).links:
+        info = sn_query.parse_list_url(link.url)
+        item = SnLinkConditions(id=link.id, name=link.name, kind=info["kind"], table=info["table"], title=info["title"])
+        if not info["table"]:
+            item.unsupported = "无法解析这条链接（需要 simplelist 或经典列表链接）"
+        else:
+            fragments, reason = sn_query.split_query(info["query"])
+            item.unsupported = reason
+            item.conditions = [
+                SnCondition(raw=f, label=sn_query.label_for(f, names), custom=f in names, **sn_query.describe(f))
+                for f in fragments
+            ]
+        out.append(item)
+    return SnConditionsResponse(links=out)
+
+
+class SnConditionName(BaseModel):
+    raw: str
+    name: str = ""
+
+
+@router.post("/api/servicenow/links/condition-names")
+def save_condition_name(body: SnConditionName, user: User = Depends(require_user)) -> dict[str, str]:
+    raw = body.raw.strip()
+    if not raw or len(raw) > 1000 or not sn_query.is_valid_unit(raw):
+        raise HTTPException(status_code=400, detail="无效的条件")
+    names = _condition_names(user.id)
+    name = body.name.strip()[:100]
+    if name:
+        if raw not in names and len(names) >= _MAX_CONDITION_NAMES:
+            raise HTTPException(status_code=400, detail=f"最多保存 {_MAX_CONDITION_NAMES} 个条件名称")
+        names[raw] = name
+    else:
+        names.pop(raw, None)
+    _set_user_setting(user.id, _CONDITION_NAMES_KEY, json.dumps(names, ensure_ascii=False))
+    return names
+
+
+class SnBuildRequest(BaseModel):
+    base_id: str
+    conditions: list[str]
+    format: Literal["classic", "simplelist"] = "classic"
+    title: str = ""
+
+
+class SnBuildResponse(BaseModel):
+    url: str
+    query: str
+
+
+@router.post("/api/servicenow/links/build")
+def build_link(body: SnBuildRequest, user: User = Depends(require_user)) -> SnBuildResponse:
+    """Build a link from the base link's table and host plus the chosen condition fragments."""
+    links = get_links(user).links
+    base = next((l for l in links if l.id == body.base_id), None)
+    if base is None:
+        raise HTTPException(status_code=404, detail="找不到基础链接")
+    info = sn_query.parse_list_url(base.url)
+    if not info["table"]:
+        raise HTTPException(status_code=400, detail="基础链接无法解析")
+    fragments = [c.strip() for c in body.conditions if c.strip()]
+    if not fragments:
+        raise HTTPException(status_code=400, detail="请至少选择一个条件")
+    if len(fragments) > _MAX_BUILD_CONDITIONS:
+        raise HTTPException(status_code=400, detail=f"最多组合 {_MAX_BUILD_CONDITIONS} 个条件")
+    for f in fragments:
+        if len(f) > 1000 or not sn_query.is_valid_unit(f):
+            raise HTTPException(status_code=400, detail="条件格式无效")
+    fragments = list(dict.fromkeys(fragments))
+
+    app_path = info["app_path"]
+    if body.format == "simplelist" and not app_path:
+        # A classic base link has no app path; borrow it from a saved simplelist link on the same host.
+        for l in links:
+            other = sn_query.parse_list_url(l.url)
+            if other["kind"] == "simplelist" and other["host"] == info["host"]:
+                app_path = other["app_path"]
+                break
+    query = "^".join(fragments)
+    url = sn_query.build_url(
+        body.format, info["host"], info["table"], query, body.title.strip()[:100] or base.name, app_path
+    )
+    if len(url) > 4000 or not _is_servicenow_url(url):
+        raise HTTPException(status_code=400, detail="生成的链接无效或过长")
+    return SnBuildResponse(url=url, query=query)
 
 
 # ---------------------------------------------------------------------------

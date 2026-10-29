@@ -15,6 +15,7 @@
 | Worker（Playwright 子进程） | `servicenow_worker.py` |
 | 后端路由 | `app/routers/servicenow.py`（在 `app/main.py` 注册） |
 | 前端页面 | `frontend/src/ServiceNowTables.jsx` / `.css`；入口卡片在 `HomePage.jsx`，路由在 `App.jsx`（tool id `servicenow`） |
+| 常用链接、公式、组合条件 | `frontend/src/ServiceNowLinks.jsx`、`LinkCellInput.jsx`、`LinkComposer.jsx`、`useSnLinks.js`、`formula.js`；后端 `app/core/sn_query.py` |
 
 ## 功能
 
@@ -23,6 +24,10 @@
 - **复制结果**：同时写入 HTML 和制表符文本，可粘贴到 Excel / Outlook / Teams。
 - **编辑内容**：只作用于当前表格，可改表格标题、行名、列名和各格列表 URL（格式不对会标红，刷新时跳过）。没有“保存”按钮，改动停止输入约 0.6 秒后自动保存，工具栏显示保存状态，失败可点击重试。切换表格或点刷新会退出编辑态。
 - **表格管理**：标签旁的 `⋯` 菜单（重命名、复制一份、删除），双击标签也可重命名；新建表格先输入名称（默认自动编号，如“新表格 2”），默认 2×2，直接进入编辑。删除含链接的行或列会先确认。
+- **常用链接**：登录身份栏下面一条默认折叠的收藏列表（`🔖 常用链接 (N)`），按软件用户保存（key `servicenow_links`），每条有名称、链接、备注和可选的缩写。可打开、复制、编辑、删除。
+- **单元格引用与公式**：编辑内容时，单元格可以填普通 URL，也可以引用常用链接：输入 `=` 开头的公式 `=[PB]+[PR]`（`[缩写]` 是链接上设置的缩写，支持加法、括号、整数），或用 🔖 按钮整格引用某条链接。设计见 [link-references.md](link-references.md)。
+- **组合条件**：常用链接里的「组合」可以把几条链接的筛选条件勾选后重组成新链接，经典或 simplelist 格式任选，见 [condition-composer.md](condition-composer.md)。
+- **数字来源与可信度**：数字悬停显示来源（REST 接口 / 页面）。REST 返回 0、页面又没能确认时显示橙色的 `0 ⚠`，说明见 [count-consistency-check.md](count-consistency-check.md)。
 - **登录身份**：页面顶部的下拉框。每个身份有独立的 Edge 数据目录和 cookie 文件，可添加、重命名、删除、清除登录状态、重新检查登录，并显示当前登录的用户名。数字缓存（浏览器 `localStorage`，key `sn_counts:<身份id>`）按身份分开。表格定义（链接）在各身份之间共用。
 - 目前**所有身份实际都会以运行服务那台电脑的 Windows 用户登录**，见 [authentication.md](authentication.md) 的“登录身份的限制”。
 
@@ -40,7 +45,7 @@ stdout：
 
 - `STATUS:<文本>`：进度。
 - `STAGE:check|window|working`：阶段标记，后端转成 SSE `stage` 事件。`check` 是用已保存的登录静默检查，`window` 是需要用户在弹出的 Edge 窗口里登录，`working` 是已登录。前端只在 `window` 阶段显示“请在 Edge 窗口中登录”的提示。
-- `RESULT:{url,count,source[,error]}`：每个 URL 一条；`count` 为 `null` 表示该格失败，`source` 为 `rest` 或 `dom`。
+- `RESULT:{url,count,source[,unconfirmed][,error]}`：每个 URL 一条；`count` 为 `null` 表示该格失败，`source` 为 `rest` 或 `dom`；`unconfirmed` 为 `true` 表示 REST 返回 0 而页面没能确认。
 - `IDENTITY:{user_name,display_name}`：当前会话登录的用户。
 - `DONE:{...}`：结束。`ERROR:<文本>`：整体失败。
 
@@ -49,6 +54,11 @@ stdout：
 表格：
 
 - `GET/POST /api/servicenow/config`：读取/保存表格定义。
+
+常用链接：
+
+- `GET/POST /api/servicenow/links`：读取/保存收藏列表 `{links:[{id,name,url,note,alias}]}`。只接受 `https://*.service-now.com`，最多 200 条；缩写只能含字母、数字、下划线、不以数字开头、最长 20 位，同一用户下不区分大小写、不能重复。
+- `GET /api/servicenow/links/conditions`、`POST /api/servicenow/links/build`、`POST /api/servicenow/links/condition-names`：组合条件，见 [condition-composer.md](condition-composer.md)。
 
 登录身份（均按当前软件用户隔离）：
 
@@ -68,11 +78,11 @@ stdout：
 
 ## 取数方式
 
-URL 形如 `.../x/dsva2/<app>/simplelist/<表名>/params/list-title/<标题>/query/<encoded query>`。
+URL 形如 `.../x/dsva2/<app>/simplelist/<表名>/params/list-title/<标题>/query/<encoded query>`，或经典链接 `.../classic/params/target/<表名>_list.do%3Fsysparm_query%3D...`（解析规则见 [filters.md](filters.md)）。
 
 1. 解析出表名和 encoded query（URL 解码后即可使用）。
 2. 在已登录页面内调用 `/api/now/stats/<表名>?sysparm_count=true&sysparm_query=<查询>`，带页面自己的 `X-UserToken`。`javascript:gs.beginningOfLast7Days()` 这类写法服务端可直接解析。
-3. REST 失败时，读页面上列表标题后面的数字徽章（会穿透 shadow DOM，对页面改版较脆弱）。
+3. REST 失败，**或返回 0** 时，读页面自己显示的数字：经典页读 `gsft_main` 里列表表格的 `grand_total_rows`；simplelist 优先取页面自己的 GraphQL 响应（`nowRecordListConnected` 的 `layoutQuery.count`），取不到再读列表标题后面的数字徽章（会穿透 shadow DOM，对页面改版较脆弱）。REST 返回 0 也要确认，是因为 query 含 `sys_tags` 等 REST 不可读的字段时，stats 接口会静默返回 0（见 [filters.md](filters.md)、[count-consistency-check.md](count-consistency-check.md)）。
 
 已验证：REST 结果 13，与页面徽章一致。
 
@@ -89,6 +99,7 @@ URL 形如 `.../x/dsva2/<app>/simplelist/<表名>/params/list-title/<标题>/que
 
 ## 后续扩展
 
+- Sub phase 等筛选、经典链接适配与合计需求见 [filters.md](filters.md)：Workspace 页面里改筛选器不会写入 URL，建议改用经典列表链接（筛选直接体现在 URL）；选项字段用内部值（Pre-Sales=1，Requests=2）。
 - 取数口径不同的格子，只要给出对应的 ServiceNow 列表 URL 即可；如果不是 `simplelist` 页面，需要扩展 `parse_list_url`，或改成直接填表名 + encoded query。
 - 同事（不同账号）的身份登录尚未实现，方案和已知事实见 [authentication.md](authentication.md) 的“未实现：用别人的账号登录”。
 - 若要完全脱离浏览器，可向 ServiceNow 管理员申请只读 API 账号（OAuth）。
