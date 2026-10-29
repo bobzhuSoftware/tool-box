@@ -15,7 +15,7 @@
 | Worker（Playwright 子进程） | `servicenow_worker.py` |
 | 后端路由 | `app/routers/servicenow.py`（在 `app/main.py` 注册） |
 | 前端页面 | `frontend/src/ServiceNowTables.jsx` / `.css`；入口卡片在 `HomePage.jsx`，路由在 `App.jsx`（tool id `servicenow`） |
-| 常用链接、公式、组合条件 | `frontend/src/ServiceNowLinks.jsx`、`LinkCellInput.jsx`、`LinkComposer.jsx`、`useSnLinks.js`、`formula.js`；后端 `app/core/sn_query.py` |
+| 常用链接、公式、组合条件 | `frontend/src/ServiceNowLinks.jsx`、`LinkCellInput.jsx`、`LinkComposer.jsx`、`ConditionLibrary.jsx`、`useSnLinks.js`、`formula.js`；后端 `app/core/sn_query.py` |
 
 ## 功能
 
@@ -58,7 +58,7 @@ stdout：
 常用链接：
 
 - `GET/POST /api/servicenow/links`：读取/保存收藏列表 `{links:[{id,name,url,note,alias}]}`。只接受 `https://*.service-now.com`，最多 200 条；缩写只能含字母、数字、下划线、不以数字开头、最长 20 位，同一用户下不区分大小写、不能重复。
-- `GET /api/servicenow/links/conditions`、`POST /api/servicenow/links/build`、`POST /api/servicenow/links/condition-names`：组合条件，见 [condition-composer.md](condition-composer.md)。
+- `GET /api/servicenow/links/conditions`、`POST /api/servicenow/links/build`、`POST /api/servicenow/links/condition-names`，以及条件库的 `/api/servicenow/conditions`（含 `/delete`、`/cleanup`、`/import/preview`、`/import`）：组合条件与条件库，见 [condition-composer.md](condition-composer.md)。
 
 登录身份（均按当前软件用户隔离）：
 

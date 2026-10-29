@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import useSSEStream from './useSSEStream'
 import ServiceNowLinks from './ServiceNowLinks'
 import LinkCellInput from './LinkCellInput'
 import useSnLinks, { REF_PREFIX } from './useSnLinks'
 import { parseFormula, evaluateFormula, formulaMentions } from './formula'
+import { moveAxis } from './tableMove'
 import './ServiceNowTables.css'
 
 const emptyCounts = { values: {}, at: null }
@@ -132,6 +134,61 @@ function ActionMenu({ title, items, disabled, align = 'right' }) {
   )
 }
 
+// Edit-mode picker for the rows/columns a total adds up. The list opens in a fixed-position popover
+// (portaled to <body>) so it neither stretches the header cell nor gets clipped by the scrolling table.
+function SumPicker({ names, isSum, members, onToggle }) {
+  const [pos, setPos] = useState(null)
+  const btnRef = useRef(null)
+  const menuRef = useRef(null)
+  const open = !!pos
+  const candidates = names.map((name, i) => ({ name, i })).filter(({ i }) => !isSum(i))
+
+  useEffect(() => {
+    if (!open) return undefined
+    const inside = (e) => btnRef.current?.contains(e.target) || menuRef.current?.contains(e.target)
+    const onDown = (e) => { if (!inside(e)) setPos(null) }
+    const onScroll = (e) => { if (!menuRef.current?.contains(e.target)) setPos(null) }
+    const onKey = (e) => { if (e.key === 'Escape') setPos(null) }
+    const close = () => setPos(null)
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', close)
+    }
+  }, [open])
+
+  const toggleOpen = () => {
+    if (open) { setPos(null); return }
+    const rect = btnRef.current.getBoundingClientRect()
+    setPos({ top: rect.bottom + 2, left: Math.min(rect.left, window.innerWidth - 260) })
+  }
+
+  return (
+    <>
+      <button ref={btnRef} className="sn-sum-btn" aria-expanded={open} onClick={toggleOpen}>
+        汇总 {members.filter((m) => !isSum(m)).length}/{candidates.length} ▾
+      </button>
+      {open && createPortal(
+        <div className="sn-sum-menu" ref={menuRef} style={{ top: pos.top, left: pos.left }}>
+          {candidates.map(({ name, i }) => (
+            <label key={i}>
+              <input type="checkbox" checked={members.includes(i)} onChange={() => onToggle(i)} />
+              <span>{name || '（空）'}</span>
+            </label>
+          ))}
+          {!candidates.length && <span className="sn-ref-none">没有可汇总的行/列</span>}
+        </div>,
+        document.body
+      )}
+    </>
+  )
+}
+
 function ServiceNowTables({ token, onAuthError }) {
   const [tables, setTables] = useState([])
   const [activeId, setActiveId] = useState(null)
@@ -148,11 +205,15 @@ function ServiceNowTables({ token, onAuthError }) {
   const [liveStatus, setLiveStatus] = useState('')
   const [loginResult, setLoginResult] = useState(null) // { ok, text } shown after login/check
   const [saveState, setSaveState] = useState('idle') // 'idle' | 'pending' | 'saving' | 'saved' | 'error'
+  const [drag, setDrag] = useState(null) // { axis, from, over } while a row/column is being dragged
   const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
   const linksStore = useSnLinks(token, onAuthError)
   const { links: savedLinks, loaded: linksLoaded, loadError: linksError } = linksStore
 
   const saver = useRef({ timer: null, latest: null, running: false })
+  const wrapRef = useRef(null)
+  const scrollSpeed = useRef(0)
+  const focusHead = useRef(null) // header just added; focused (and scrolled into view) after render
   const tokenRef = useRef(token)
   tokenRef.current = token
 
@@ -283,6 +344,24 @@ function ServiceNowTables({ token, onAuthError }) {
   const sums = table?.sums || {}
   const isSum = (axis, idx) => `${axis}${idx}` in sums
 
+  useEffect(() => {
+    if (!focusHead.current) return
+    const input = wrapRef.current?.querySelector(`[data-head="${focusHead.current}"]`)
+    if (!input) return
+    focusHead.current = null
+    input.focus()
+    input.select()
+  })
+
+  useEffect(() => {
+    if (drag?.axis !== 'c') return undefined
+    scrollSpeed.current = 0
+    const timer = setInterval(() => {
+      if (scrollSpeed.current && wrapRef.current) wrapRef.current.scrollLeft += scrollSpeed.current
+    }, 16)
+    return () => { clearInterval(timer); scrollSpeed.current = 0 }
+  }, [drag?.axis])
+
   // A cell value is a plain URL or "ref:<id>" of a saved link. Resolves to the URL to use:
   // { url } normally, { loading } while the saved links load, { error } if the link is unavailable.
   const resolveCell = (raw) => {
@@ -395,6 +474,7 @@ function ServiceNowTables({ token, onAuthError }) {
 
   const addAxis = (axis) => {
     const key = axis === 'r' ? 'rows' : 'cols'
+    focusHead.current = `${axis}${table[key].length}`
     updateTable({ [key]: [...table[key], `${axis === 'r' ? '行' : '列'} ${table[key].length + 1}`] })
   }
 
@@ -412,10 +492,113 @@ function ServiceNowTables({ token, onAuthError }) {
     })
   }
 
+  const moveHeader = (axis, from, to) => {
+    const patch = moveAxis({ ...table, sums }, axis, from, to)
+    if (patch) updateTable(patch)
+  }
+
+  const headerDnD = (axis, idx) => ({
+    onDragOver: (e) => {
+      if (drag?.axis !== axis) return
+      e.preventDefault()
+      if (drag.over !== idx) setDrag({ ...drag, over: idx })
+    },
+    onDrop: (e) => {
+      if (drag?.axis !== axis) return
+      e.preventDefault()
+      moveHeader(axis, drag.from, idx)
+      setDrag(null)
+    },
+  })
+
+  // The pinned title cell is always visible, so it doubles as a "move to the very first position" target.
+  const titleDnD = {
+    onDragOver: (e) => {
+      if (!drag) return
+      e.preventDefault()
+      if (drag.over !== 'start') setDrag({ ...drag, over: 'start' })
+    },
+    onDrop: (e) => {
+      if (!drag) return
+      e.preventDefault()
+      moveHeader(drag.axis, drag.from, 0)
+      setDrag(null)
+    },
+  }
+
+  const dragClass = (axis, idx) =>
+    drag?.axis === axis && drag.from !== idx && drag.over === idx
+      ? `sn-drop-${axis}${drag.from < idx ? '-after' : '-before'}`
+      : drag?.axis === axis && drag.from === idx ? 'sn-dragging' : ''
+
+  // While dragging a column, scroll the table sideways when the pointer nears either edge.
+  // The left edge starts after the pinned first column, which otherwise hides the first data columns.
+  const onWrapDragOver = (e) => {
+    if (drag?.axis !== 'c') return
+    const wrap = wrapRef.current
+    const pinned = wrap.querySelector('thead th:first-child')?.offsetWidth || 0
+    const rect = wrap.getBoundingClientRect()
+    const zone = 90
+    const max = 24
+    const left = rect.left + pinned + zone
+    const right = rect.right - zone
+    if (e.clientX < left) scrollSpeed.current = -Math.min(max, ((left - e.clientX) / zone) * max)
+    else if (e.clientX > right) scrollSpeed.current = Math.min(max, ((e.clientX - right) / zone) * max)
+    else scrollSpeed.current = 0
+  }
+
+  const onWrapDragLeave = (e) => {
+    if (!wrapRef.current.contains(e.relatedTarget)) scrollSpeed.current = 0
+  }
+
+  // One editable row/column header: drag handle, name, move and delete buttons (plus the total picker).
+  // Only the handle is draggable so selecting text in the name input is unaffected.
+  const headEditor = (axis, idx, name, count) => {
+    const vertical = axis === 'r'
+    return (
+      <>
+        <div className="sn-head-edit">
+          <span
+            className="sn-drag-handle"
+            title="拖动以调整顺序"
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.effectAllowed = 'move'
+              e.dataTransfer.setData('text/plain', '')
+              const cell = e.currentTarget.closest('th')
+              if (cell) e.dataTransfer.setDragImage(cell, 0, 0)
+              setDrag({ axis, from: idx, over: idx })
+            }}
+            onDragEnd={() => setDrag(null)}
+          >⠿</span>
+          <input
+            data-head={`${axis}${idx}`}
+            value={name}
+            title={name}
+            onChange={(e) => setHeader(axis, idx, e.target.value)}
+          />
+          <button
+            title={vertical ? '上移（Shift+点击：移到最前）' : '左移（Shift+点击：移到最前）'}
+            disabled={idx === 0}
+            onClick={(e) => moveHeader(axis, idx, e.shiftKey ? 0 : idx - 1)}
+          >{vertical ? '▲' : '◀'}</button>
+          <button
+            title={vertical ? '下移（Shift+点击：移到最后）' : '右移（Shift+点击：移到最后）'}
+            disabled={idx === count - 1}
+            onClick={(e) => moveHeader(axis, idx, e.shiftKey ? count - 1 : idx + 1)}
+          >{vertical ? '▼' : '▶'}</button>
+          <button title={vertical ? '删除此行' : '删除此列'} onClick={() => removeAxis(axis, idx)}>✕</button>
+        </div>
+        {isSum(axis, idx) && sumPicker(axis, idx)}
+      </>
+    )
+  }
+
   // A total row/column is an ordinary row/column that adds up the chosen rows/columns of its axis.
   const addSum = (axis) => {
     const key = axis === 'r' ? 'rows' : 'cols'
     const members = table[key].map((_, i) => i).filter((i) => !isSum(axis, i))
+    focusHead.current = `${axis}${table[key].length}`
     updateTable({
       [key]: [...table[key], '合计'],
       sums: { ...sums, [`${axis}${table[key].length}`]: members },
@@ -535,6 +718,7 @@ function ServiceNowTables({ token, onAuthError }) {
     setStage(null)
     setLiveStatus('正在准备…')
     const runAcc = accId
+    let announced = false
 
     try {
       await streamSSE(
@@ -547,6 +731,15 @@ function ServiceNowTables({ token, onAuthError }) {
         {
           onAuthError,
           onEvent: (event) => {
+            if (!announced) {
+              announced = true
+              addLog({
+                type: 'status',
+                message: onlyFailed
+                  ? `重试 ${urls.length} 个失败的链接`
+                  : `${cellValues.length} 个单元格，共 ${urls.length} 个不同的链接（公式用到的每个链接各读一次）`,
+              })
+            }
             if (event.type === 'result') {
               const { url, count, error, source, unconfirmed } = event.data
               setPending((prev) => { const n = new Set(prev); n.delete(url); return n })
@@ -582,30 +775,36 @@ function ServiceNowTables({ token, onAuthError }) {
   }
 
   // Sum of the formula's variables. Variables without data count as 0 and make the result partial (⚠),
-  // the same way incomplete totals behave. An unconfirmed 0 counts as missing too.
+  // the same way incomplete totals behave. An unconfirmed 0 is still shown, with ⚠, instead of hiding
+  // the number; like the plain cell it is not a trusted count for totals and copying.
   const formulaInfo = (raw) => {
     const f = resolveFormula(raw)
     const entries = Object.entries(f.vars || {})
     if (f.loading || entries.some(([, v]) => pending.has(v.url))) return { kind: 'pending', text: '…' }
     const failures = {}
+    const unconfirmed = []
     const { total, missing } = evaluateFormula(f.parsed.ast, (key) => {
       const v = counts.values[f.vars[key].url]
       if (!v || v.error) { failures[key] = v?.error || '尚未读取'; return null }
-      if (v.unconfirmed) { failures[key] = UNCONFIRMED_HINT; return null }
+      if (v.unconfirmed) unconfirmed.push(f.vars[key].alias)
       return v.count
     })
     const expr = raw.trim()
+    const missingDetail = missing.map((a) => `[${a}]：${failures[a.toLowerCase()]}`).join('\n')
+    const unconfirmedDetail = unconfirmed.length ? `${UNCONFIRMED_HINT}：${unconfirmed.map((a) => `[${a}]`).join('、')}` : ''
     if (missing.length === entries.length && entries.length) {
-      return { kind: 'none', text: '—', title: `${expr}\n还没有数据` }
+      return { kind: 'none', text: '—', title: `${expr}\n没有数据：\n${missingDetail}` }
     }
     if (missing.length) {
-      const detail = missing.map((a) => `[${a}]：${failures[a.toLowerCase()]}`).join('\n')
-      return { kind: 'partial', text: `${total} ⚠`, title: `${expr}\n结果不完整，缺少：\n${detail}` }
+      const detail = [`结果不完整，缺少：\n${missingDetail}`, unconfirmedDetail].filter(Boolean).join('\n')
+      return { kind: 'partial', text: `${total} ⚠`, title: `${expr}\n${detail}` }
     }
     const values = entries
       .map(([, v]) => `[${v.alias}] = ${counts.values[v.url].count}${sourceSuffix(counts.values[v.url].source)}`)
       .join('\n')
-    return { kind: 'count', text: String(total), value: total, title: values ? `${expr}\n${values}` : expr }
+    const title = [expr, values, unconfirmedDetail].filter(Boolean).join('\n')
+    if (unconfirmed.length) return { kind: 'unconfirmed', text: `${total} ⚠`, value: total, title }
+    return { kind: 'count', text: String(total), value: total, title }
   }
 
   // `raw` is the stored cell value; returns what to show and, for counts, the URL to open.
@@ -649,21 +848,14 @@ function ServiceNowTables({ token, onAuthError }) {
   }
 
   // Checkbox list (edit mode) choosing which rows/columns a total adds up.
-  const sumPicker = (axis, idx) => {
-    const names = axis === 'r' ? table.rows : table.cols
-    const members = sums[`${axis}${idx}`] || []
-    return (
-      <div className="sn-sum-pick">
-        <span>汇总：</span>
-        {names.map((name, i) => (isSum(axis, i) ? null : (
-          <label key={i}>
-            <input type="checkbox" checked={members.includes(i)} onChange={() => toggleSum(axis, idx, i)} />
-            {name}
-          </label>
-        )))}
-      </div>
-    )
-  }
+  const sumPicker = (axis, idx) => (
+    <SumPicker
+      names={axis === 'r' ? table.rows : table.cols}
+      isSum={(i) => isSum(axis, i)}
+      members={sums[`${axis}${idx}`] || []}
+      onToggle={(i) => toggleSum(axis, idx, i)}
+    />
+  )
 
   const copyResults = async () => {
     if (!table) return
@@ -855,16 +1047,28 @@ function ServiceNowTables({ token, onAuthError }) {
             </div>
 
             {editing && (
-              <p className="sn-hint">
-                直接修改表格标题、行名、列名和链接，改动会自动保存。单元格也可以填公式，如 =[PB]+[PR]（[缩写] 在常用链接里设置，输入 [ 可选择）。
-              </p>
+              <>
+                <p className="sn-hint">
+                  直接修改表格标题、行名、列名和链接，改动会自动保存。单元格也可以填公式，如 =[PB]+[PR]（[缩写] 在常用链接里设置，输入 [ 可选择）。拖动 ⠿ 或点箭头可调整行/列顺序。
+                </p>
+                <div className="sn-edit-tools">
+                  <button className="sn-add" onClick={() => addAxis('r')}>＋ 行</button>
+                  <button className="sn-add" onClick={() => addSum('r')}>＋ 合计行</button>
+                  <button className="sn-add" onClick={() => addAxis('c')}>＋ 列</button>
+                  <button className="sn-add" onClick={() => addSum('c')}>＋ 合计列</button>
+                </div>
+              </>
             )}
 
-            <div className="sn-table-wrap">
-              <table className="sn-table">
+            <div className="sn-table-wrap" ref={wrapRef} onDragOver={onWrapDragOver} onDragLeave={onWrapDragLeave}>
+              <table className={`sn-table${editing ? ' sn-editing' : ''}`}>
                 <thead>
                   <tr>
-                    <th>
+                    <th
+                      className={drag?.over === 'start' ? 'sn-drop-start' : ''}
+                      title={editing && drag ? '放到这里：移到最前' : undefined}
+                      {...(editing ? titleDnD : {})}
+                    >
                       {editing ? (
                         <input
                           className="sn-title-input"
@@ -874,39 +1078,17 @@ function ServiceNowTables({ token, onAuthError }) {
                       ) : table.title}
                     </th>
                     {table.cols.map((col, c) => (
-                      <th key={c}>
-                        {editing ? (
-                          <>
-                            <div className="sn-head-edit">
-                              <input value={col} onChange={(e) => setHeader('c', c, e.target.value)} />
-                              <button title="删除此列" onClick={() => removeAxis('c', c)}>✕</button>
-                            </div>
-                            {isSum('c', c) && sumPicker('c', c)}
-                          </>
-                        ) : col}
+                      <th key={c} className={dragClass('c', c)} {...(editing ? headerDnD('c', c) : {})}>
+                        {editing ? headEditor('c', c, col, table.cols.length) : col}
                       </th>
                     ))}
-                    {editing && (
-                      <th>
-                        <button className="sn-add" onClick={() => addAxis('c')}>＋ 列</button>{' '}
-                        <button className="sn-add" onClick={() => addSum('c')}>＋ 合计列</button>
-                      </th>
-                    )}
                   </tr>
                 </thead>
                 <tbody>
                   {table.rows.map((row, r) => (
                     <tr key={r}>
-                      <th>
-                        {editing ? (
-                          <>
-                            <div className="sn-head-edit">
-                              <input value={row} onChange={(e) => setHeader('r', r, e.target.value)} />
-                              <button title="删除此行" onClick={() => removeAxis('r', r)}>✕</button>
-                            </div>
-                            {isSum('r', r) && sumPicker('r', r)}
-                          </>
-                        ) : row}
+                      <th className={dragClass('r', r)} {...(editing ? headerDnD('r', r) : {})}>
+                        {editing ? headEditor('r', r, row, table.rows.length) : row}
                       </th>
                       {table.cols.map((_, c) => {
                         const sumInfo = sumCellInfo(r, c)
@@ -953,14 +1135,6 @@ function ServiceNowTables({ token, onAuthError }) {
                       })}
                     </tr>
                   ))}
-                  {editing && (
-                    <tr>
-                      <th>
-                        <button className="sn-add" onClick={() => addAxis('r')}>＋ 行</button>{' '}
-                        <button className="sn-add" onClick={() => addSum('r')}>＋ 合计行</button>
-                      </th>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>

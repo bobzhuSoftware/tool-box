@@ -16,27 +16,47 @@
 .sn-save-error { border: none; background: none; color: #c62828; cursor: pointer; text-decoration: underline; padding: 0; }
 .sn-empty { padding: 1.5rem 0; text-align: center; color: #666; }
 .sn-empty .sn-btn { background: #646cff; color: #fff; }
-.sn-title-input { width: 8rem; padding: 0.2rem 0.4rem; font-weight: 700; }
+.sn-title-input { width: 100%; box-sizing: border-box; padding: 0.2rem 0.4rem; font-weight: 700; }
 .sn-url-invalid { border-color: #dc2626 !important; outline-color: #dc2626; background: #fef2f2; }
 .sn-table td a { color: inherit; text-decoration: none; }
 .sn-table td a:hover { text-decoration: underline; color: #4338ca; }
 .sn-log > summary { cursor: pointer; color: #666; font-size: 0.85rem; margin-bottom: 0.4rem; }
 
-.sn-table-wrap { overflow-x: auto; }
-.sn-table { border-collapse: collapse; background: #fff; color: #111; font-size: 1rem; }
-.sn-table th, .sn-table td { border: 1px solid #333; padding: 0.35rem 0.9rem; text-align: left; min-width: 4rem; }
+.sn-table-wrap { overflow-x: auto; scroll-padding-left: 17rem; }
+/* Separate borders (right/bottom per cell) so the sticky header column keeps its lines while scrolling. */
+.sn-table { border-collapse: separate; border-spacing: 0; border-top: 1px solid #333; border-left: 1px solid #333; background: #fff; color: #111; font-size: 1rem; }
+.sn-table th, .sn-table td { border-right: 1px solid #333; border-bottom: 1px solid #333; padding: 0.35rem 0.9rem; text-align: left; min-width: 4rem; }
 .sn-table th { font-weight: 700; }
-.sn-table tbody th, .sn-table thead th:first-child { position: sticky; left: 0; z-index: 1; background: #fff; box-shadow: 1px 0 0 #333; }
+.sn-table tbody th, .sn-table thead th:first-child { position: sticky; left: 0; z-index: 1; background: #fff; }
 .sn-table td { font-weight: 400; }
 .sn-cell-error { color: #c62828; cursor: help; }
 .sn-cell-warn, .sn-cell-warn a { color: #b45309; }
 .sn-sum-cell { font-weight: 700 !important; background: #f3f4f6; }
-.sn-sum-pick { display: flex; flex-wrap: wrap; gap: 0.2rem 0.6rem; margin-top: 0.3rem; font-size: 0.75rem; font-weight: 400; color: #555; }
-.sn-sum-pick label { display: inline-flex; align-items: center; gap: 0.2rem; cursor: pointer; }
 
-.sn-head-edit { display: flex; gap: 0.2rem; }
-.sn-head-edit input { min-width: 7rem; padding: 0.2rem 0.4rem; }
-.sn-head-edit button, .sn-add { border: 1px solid #ccc; background: #fafafa; border-radius: 4px; cursor: pointer; padding: 0.1rem 0.5rem; }
+/* Edit mode: fixed column widths and top alignment so header/cell inputs line up whatever the content. */
+.sn-editing th, .sn-editing td { padding: 0.35rem 0.6rem; vertical-align: top; }
+.sn-editing th:first-child { width: 16rem; min-width: 16rem; }
+.sn-editing td, .sn-editing thead th:not(:first-child) { width: 19rem; min-width: 19rem; }
+.sn-edit-tools { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
+.sn-sum-btn { display: block; margin-top: 0.3rem; padding: 0.1rem 0.5rem; border: 1px solid #c7d2fe; border-radius: 4px; background: #eef2ff; color: #3730a3; font-size: 0.75rem; cursor: pointer; }
+.sn-sum-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; gap: 0.1rem; min-width: 12rem; max-width: 18rem; max-height: 14rem; overflow-y: auto; padding: 0.3rem; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #222; font-size: 0.85rem; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); }
+.sn-sum-menu label { display: flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.4rem; border-radius: 4px; cursor: pointer; }
+.sn-sum-menu label:hover { background: #f0f0f5; }
+.sn-sum-menu span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sn-head-edit { display: flex; align-items: center; gap: 0.2rem; }
+.sn-head-edit input { flex: 1; min-width: 0; width: 0; padding: 0.2rem 0.4rem; }
+.sn-head-edit button { flex: none; width: 1.6rem; height: 1.6rem; padding: 0; font-size: 0.7rem; line-height: 1; }
+.sn-head-edit button, .sn-add { border: 1px solid #ccc; background: #fafafa; border-radius: 4px; cursor: pointer; }
+.sn-add { padding: 0.1rem 0.5rem; }
+.sn-head-edit button:disabled { visibility: hidden; }
+.sn-drag-handle { display: inline-flex; align-items: center; flex: none; color: #777; cursor: grab; user-select: none; }
+.sn-dragging { opacity: 0.45; }
+.sn-table th.sn-drop-c-before, .sn-table th.sn-drop-r-before { box-shadow: inset 4px 0 0 #4338ca; }
+.sn-table th.sn-drop-c-after, .sn-table th.sn-drop-r-after { box-shadow: inset -4px 0 0 #4338ca; }
+.sn-table th.sn-drop-r-before { box-shadow: inset 0 4px 0 #4338ca; }
+.sn-table th.sn-drop-r-after { box-shadow: inset 0 -4px 0 #4338ca; }
+.sn-table th.sn-drop-start { box-shadow: inset 0 0 0 3px #4338ca; background: #eef2ff; }
 .sn-url-input { width: 16rem; padding: 0.2rem 0.4rem; font-size: 0.8rem; }
 .sn-ref-wrap { position: relative; display: inline-flex; align-items: center; gap: 0.2rem; }
 .sn-ref-btn { border: 1px solid #ccc; background: #fafafa; border-radius: 4px; cursor: pointer; padding: 0.1rem 0.3rem; font-size: 0.8rem; }
@@ -137,6 +157,53 @@
 .sn-comp-format label { display: inline-flex; align-items: center; gap: 0.25rem; cursor: pointer; }
 .sn-comp-preview { margin: 0 0 0.5rem; font-size: 0.75rem; color: #777; overflow: hidden; }
 .sn-comp-preview code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sn-links-bar-actions { display: flex; gap: 0.4rem; }
+.sn-modal-xl { width: min(66rem, 100%); }
+.sn-lib-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.6rem; }
+.sn-lib-info { color: #047857; }
+.sn-lib-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 1.2rem; align-items: start; }
+@media (max-width: 760px) { .sn-lib-grid { grid-template-columns: minmax(0, 1fr); } }
+.sn-lib-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+.sn-lib-tools select, .sn-lib-tools input { padding: 0.3rem 0.5rem; font-size: 0.85rem; }
+.sn-lib-tools input { flex: 1; min-width: 8rem; }
+.sn-lib-add { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.5rem; padding: 0.5rem; border: 1px dashed #c7d2fe; border-radius: 8px; background: #f8f9ff; }
+.sn-lib-add input { padding: 0.3rem 0.5rem; font-size: 0.85rem; }
+.sn-lib-add button { align-self: flex-start; }
+.sn-lib-list { max-height: 52vh; overflow-y: auto; }
+.sn-lib-filters { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.5rem; }
+.sn-lib-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.sn-lib-chip { padding: 0.15rem 0.55rem; border: 1px solid #e0e0ea; border-radius: 999px; background: #fff; color: #555; font-size: 0.78rem; cursor: pointer; white-space: nowrap; }
+.sn-lib-chip:hover:not(.active) { border-color: #a5b4fc; color: #4338ca; }
+.sn-lib-chip.active { border-color: #6366f1; background: #eef2ff; color: #4338ca; font-weight: 600; }
+.sn-lib-filters .sn-lib-tools { margin-bottom: 0; }
+.sn-lib-filters select { flex: 1; min-width: 0; max-width: 100%; }
+.sn-lib-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 0.3rem 0.8rem; color: #777; font-size: 0.78rem; }
+.sn-lib-group + .sn-lib-group { margin-top: 0.2rem; }
+.sn-lib-group-head { display: flex; align-items: center; gap: 0.3rem; width: 100%; padding: 0.25rem 0.3rem; border: none; border-radius: 6px; background: #f6f6fa; color: #333; font-size: 0.82rem; text-align: left; cursor: pointer; position: sticky; top: 0; z-index: 1; }
+.sn-lib-group-head:hover { background: #eef0fb; }
+.sn-lib-group-name { font-weight: 600; word-break: break-all; }
+.sn-lib-picked { margin-left: auto; padding: 0 0.4rem; border-radius: 4px; background: #6366f1; color: #fff; font-size: 0.7rem; line-height: 1.5; }
+.sn-lib-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.4rem; padding: 0.3rem 0; border-top: 1px solid #f3f3f3; }
+.sn-lib-item:first-child { border-top: none; }
+.sn-lib-item label { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.1rem 0.5rem; cursor: pointer; font-size: 0.85rem; min-width: 0; }
+.sn-lib-item .sn-ref-note { flex-basis: 100%; padding-left: 1.5rem; }
+.sn-lib-used { padding: 0 0.35rem; border-radius: 4px; background: #eef2ff; color: #4338ca; font-size: 0.7rem; line-height: 1.5; cursor: help; }
+.sn-lib-unused { background: #fff7ed; color: #c2410c; }
+.sn-lib-source { background: #ecfdf5; color: #047857; cursor: help; }
+.sn-lib-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; }
+.sn-lib-import { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; box-sizing: border-box; padding: 0.5rem; border: 1px dashed #a7f3d0; border-radius: 8px; background: #f6fffb; }
+.sn-lib-import textarea { width: 100%; box-sizing: border-box; padding: 0.3rem 0.5rem; font-size: 0.8rem; font-family: inherit; resize: vertical; }
+.sn-lib-import .btn-primary { align-self: flex-start; }
+.sn-lib-import-item { padding-top: 0.3rem; border-top: 1px solid #e5f3ee; }
+.sn-lib-import-item:first-of-type { border-top: none; }
+.sn-lib-import-head { font-size: 0.8rem; font-weight: 600; color: #333; word-break: break-all; }
+.sn-lib-import-item label { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.1rem 0.5rem; cursor: pointer; font-size: 0.85rem; }
+.sn-lib-actions { display: flex; flex: none; }
+.sn-lib-edit { display: flex; flex-direction: column; gap: 0.3rem; width: 100%; }
+.sn-lib-edit input { padding: 0.3rem 0.5rem; font-size: 0.85rem; }
+.sn-lib-raw { font-size: 0.75rem; color: #666; word-break: break-all; }
+.sn-lib-edit-actions { display: flex; gap: 0.4rem; }
+.sn-lib-right .sn-comp-sec { margin-top: 0; }
 
 .sn-busy { display: flex; flex-direction: column; gap: 0.2rem; margin-bottom: 0.9rem; padding: 0.6rem 0.8rem; border: 1px solid #c7d2fe; border-left: 4px solid #6366f1; border-radius: 8px; background: #eef2ff; color: #333; font-size: 0.9rem; }
 .sn-busy-title { font-weight: 600; color: #4338ca; }

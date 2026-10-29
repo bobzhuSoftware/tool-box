@@ -65,5 +65,45 @@ export default function useSnLinks(token, onAuthError) {
     }
   }
 
-  return { links, loaded, loadError, saving, persist, api }
+  // Authorized POST that streams server-sent events to onEvent(event); resolves to { ok, error }.
+  const stream = async (path, body, onEvent) => {
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify(body),
+      })
+      if (res.status === 401) { onAuthError?.(); return { ok: false, error: '' } }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        return { ok: false, error: data.detail || `请求失败 (${res.status})` }
+      }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let failure = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() ?? ''
+        for (const part of parts) {
+          for (const line of part.split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            try {
+              const event = JSON.parse(line.slice(6))
+              if (event.type === 'error') failure = event.message
+              onEvent(event)
+            } catch { /* ignore malformed SSE lines */ }
+          }
+        }
+      }
+      return failure ? { ok: false, error: failure } : { ok: true, error: '' }
+    } catch {
+      return { ok: false, error: '请求失败，请检查网络' }
+    }
+  }
+
+  return { links, loaded, loadError, saving, persist, api, stream }
 }

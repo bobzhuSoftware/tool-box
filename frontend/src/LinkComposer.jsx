@@ -4,7 +4,7 @@ import { linkKind } from './useSnLinks'
 const ALIAS_RE = /^[A-Za-z_][A-Za-z0-9_]{0,19}$/
 
 // Two conditions on the same field that can never both hold (field = a and field = b, or = v and != v).
-const conflicts = (a, b) =>
+export const conflicts = (a, b) =>
   !!a.field && a.field === b.field && (
     (a.op === '=' && b.op === '=' && a.value !== b.value) ||
     (((a.op === '=' && b.op === '!=') || (a.op === '!=' && b.op === '=')) && a.value === b.value)
@@ -14,6 +14,7 @@ const conflicts = (a, b) =>
 // choose the output format (classic or simplelist), and save the result as a new link.
 function LinkComposer({ base, links, api, onSave, onCancel }) {
   const [data, setData] = useState(null) // conditions of every saved link
+  const [libraryItems, setLibraryItems] = useState([]) // the condition library
   const [loadError, setLoadError] = useState('')
   const [selected, setSelected] = useState([])
   const [format, setFormat] = useState(linkKind(base.url))
@@ -30,6 +31,8 @@ function LinkComposer({ base, links, api, onSave, onCancel }) {
     const res = await api('/api/servicenow/links/conditions')
     if (!res.ok) { setLoadError(res.error); return }
     setData(res.data.links)
+    const lib = await api('/api/servicenow/conditions')
+    if (lib.ok) setLibraryItems(lib.data.conditions)
     if (!initialized.current) {
       initialized.current = true
       const mine = res.data.links.find((l) => l.id === base.id)
@@ -41,7 +44,8 @@ function LinkComposer({ base, links, api, onSave, onCancel }) {
 
   const baseInfo = data?.find((l) => l.id === base.id)
 
-  // Every distinct condition on the base link's table, base link's own first.
+  // Every distinct condition on the base link's table, base link's own first, then the other links'
+  // and finally the ones only the condition library has.
   const library = useMemo(() => {
     if (!baseInfo) return []
     const map = new Map()
@@ -54,8 +58,11 @@ function LinkComposer({ base, links, api, onSave, onCancel }) {
         map.set(c.raw, entry)
       }
     }
+    for (const c of libraryItems) {
+      if (c.table === baseInfo.table && !map.has(c.raw)) map.set(c.raw, { ...c, from: [], own: false })
+    }
     return [...map.values()]
-  }, [data, baseInfo, base.id])
+  }, [data, libraryItems, baseInfo, base.id])
 
   const byRaw = useMemo(() => new Map(library.map((c) => [c.raw, c])), [library])
 
@@ -76,7 +83,7 @@ function LinkComposer({ base, links, api, onSave, onCancel }) {
 
   const rename = async (cond) => {
     const next = window.prompt('条件名称（留空恢复默认）', cond.label)
-    if (next === null) return
+    if (next === null || (!cond.custom && next === cond.label)) return
     const res = await api('/api/servicenow/links/condition-names', 'POST', { raw: cond.raw, name: next })
     if (res.ok) load()
     else setError(res.error)
@@ -147,10 +154,10 @@ function LinkComposer({ base, links, api, onSave, onCancel }) {
 
   const row = (c) => (
     <li key={c.raw} className="sn-comp-cond">
-      <label title={c.raw}>
+      <label title={c.raw_display || c.raw}>
         <input type="checkbox" checked={selected.includes(c.raw)} onChange={() => toggle(c)} />
         <span className="sn-comp-label">{c.label}</span>
-        {!c.own && <span className="sn-ref-note">来自：{c.from.join('、')}</span>}
+        {!c.own && <span className="sn-ref-note">{c.from.length ? `来自：${c.from.join('、')}` : '来自条件库'}</span>}
       </label>
       <button className="sn-link-act" title="修改这个条件的显示名称" onClick={() => rename(c)}>✎</button>
     </li>
@@ -159,14 +166,14 @@ function LinkComposer({ base, links, api, onSave, onCancel }) {
   return (
     <div className="sn-comp">
       <div className="sn-comp-title">以「{base.name}」为基础组合条件</div>
-      <p className="sn-hint">勾选要保留的条件；下面还可以加入其他链接里的条件。只组合同一张表的条件。</p>
+      <p className="sn-hint">勾选要保留的条件；下面还可以加入其他链接和条件库里的条件。只组合同一张表的条件。</p>
       {error && <p className="sn-links-error" role="alert">{error}</p>}
 
       <div className="sn-comp-sec">基础链接的条件</div>
       <ul className="sn-comp-list">{own.map(row)}</ul>
       {others.length > 0 && (
         <>
-          <div className="sn-comp-sec">其他链接里的条件</div>
+          <div className="sn-comp-sec">其他链接和条件库里的条件</div>
           <ul className="sn-comp-list">{others.map(row)}</ul>
         </>
       )}

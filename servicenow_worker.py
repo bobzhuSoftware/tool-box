@@ -7,6 +7,8 @@ session is then reused) and returns the record count of each list.
 Usage:
     python servicenow_worker.py count <url> [<url> ...]
     python servicenow_worker.py count --file <json file with a list of urls>
+    python servicenow_worker.py resolve --file <json file with a list of saved-list urls>
+    python servicenow_worker.py names --file <json file with [{"table", "targets": {field: [values]}}]>
     python servicenow_worker.py login
 
 Environment (set per login identity by the server):
@@ -19,6 +21,8 @@ Progress is written to stdout as:
                                             sign in in the visible Edge window; working: signed in)
     RESULT:{"url","count","source"[,"unconfirmed"]}   (count: one per URL, as soon as it is read;
                                             unconfirmed: REST said 0 and the page could not confirm it)
+    RESULT:{"url","table","query","title","resolved_url"} or {"url","error"}   (resolve: one per URL)
+    RESULT:{"kind":"names","table","fields","values"}   (names; resolve also sends it for the ids it found)
     IDENTITY:{"user_name","display_name"}  (who the session is logged in as)
     DONE:{...}                             (count: {"results":[...]}; login: {"user_name",...})
     ERROR:<message>
@@ -31,7 +35,7 @@ import re
 import shutil
 import sys
 import time
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
@@ -414,7 +418,13 @@ async def _count_page(page, holder: dict, url: str, info: dict, captured: list) 
         status(f"REST 统计失败（{e}），改用页面读取…")
         rest_err = f"REST 失败：{e}"
 
-    n = await _read_page_count(page, info, captured, tries=30 if rest_count is None else 15)
+    n = await _read_page_count(page, info, captured, tries=30 if rest_count is None else 20)
+    if n is None and rest_count == 0:
+        # A slow or stalled page load is the usual reason the page can't confirm a REST 0; load it once more.
+        status("页面没有读到数字，重新加载后再试一次…")
+        captured.clear()
+        await _open(page, url)
+        n = await _read_page_count(page, info, captured, tries=30)
     if n is not None:
         return {"url": url, "count": n, "source": "dom"}
     if rest_count is not None:
@@ -426,14 +436,18 @@ async def _count_page(page, holder: dict, url: str, info: dict, captured: list) 
 async def _read_page_count(page, info: dict, captured: list, tries: int):
     """Read the count the page itself shows: classic lists (no title) via the gsft_main frame;
     Next Experience lists from the page's own GraphQL response, else the badge next to the title."""
-    for _ in range(tries):
+    for attempt in range(tries):
         n = None
         try:
             if info["title"]:
                 same_table = [c for c in captured if c["table"] == info["table"]]
                 exact = [c for c in same_table if c["query"] == info["query"]]
-                if exact or same_table:
-                    return (exact or same_table)[-1]["count"]
+                if exact:
+                    return exact[-1]["count"]
+                # A response for another query of this table may be left over from the previous page, so it
+                # is only used when the page never sent one for this exact query.
+                if same_table and attempt >= 5:
+                    return same_table[-1]["count"]
                 n = await page.evaluate(_JS_DOM, info["title"])
             else:
                 for fr in page.frames:
@@ -447,6 +461,66 @@ async def _read_page_count(page, info: dict, captured: list, tries: int):
             return n
         await asyncio.sleep(1)
     return None
+
+
+async def _capture_tiny_layout(resp, captured: list) -> None:
+    """Record the layout of every saved list (getTinyListLayout) the page loads: its filter, title and table."""
+    if "/api/now/graphql" not in resp.url:
+        return
+    try:
+        req = json.loads(resp.request.post_data or "")
+        body = await resp.json()
+        reqs = req if isinstance(req, list) else [req]
+        bodies = body if isinstance(body, list) else [body]
+        for rq, bd in zip(reqs, bodies):
+            if rq.get("operationName") != "nowRecordListConnected":
+                continue
+            layout = bd["data"]["GlideListLayout_Query"]["getTinyListLayout"]
+            fixed = layout.get("fixedQuery") or ""
+            query = layout.get("query") or ""
+            captured.append({
+                "table": (layout.get("layoutQuery") or {}).get("table") or "",
+                "query": "^".join(q for q in (fixed, query) if q),
+                "title": layout.get("listTitle") or "",
+                "table_label": layout.get("tableLabel") or "",
+            })
+    except Exception:
+        return
+
+
+async def _resolve_one(page, url: str) -> dict:
+    from app.core import sn_query
+
+    info = sn_query.parse_list_url(url)
+    if info["kind"] != "savedlist":
+        return {"url": url, "error": "不是已保存列表链接"}
+    captured: list = []
+    handler = lambda r: asyncio.create_task(_capture_tiny_layout(r, captured))  # noqa: E731
+    page.on("response", handler)
+    try:
+        await _open(page, url)
+        if not await _wait_servicenow(page, 60):
+            return {"url": url, "error": "未能进入 ServiceNow 页面（可能需要重新登录）"}
+        for _ in range(45):
+            if captured:
+                break
+            await asyncio.sleep(1)
+        if not captured:
+            return {"url": url, "error": "页面没有返回列表信息（链接可能已失效或没有权限）"}
+        layout = captured[-1]
+        if not layout["table"]:
+            return {"url": url, "error": "读到了列表，但无法确定它属于哪张表"}
+        return {
+            "url": url,
+            "table": layout["table"],
+            "query": layout["query"],
+            "title": layout["title"] or layout["table_label"],
+            "resolved_url": sn_query.build_url(
+                "simplelist", info["host"], layout["table"], layout["query"], layout["title"], info["app_path"]
+            ),
+        }
+    finally:
+        page.remove_listener("response", handler)
 
 
 async def cmd_count(urls: list[str]) -> None:
@@ -464,10 +538,148 @@ async def cmd_count(urls: list[str]) -> None:
         try:
             results = []
             for i, url in enumerate(urls, 1):
-                status(f"正在读取 ({i}/{len(urls)})…")
+                status(f"正在读取链接 ({i}/{len(urls)})…")
                 res = await _count_one(page, holder, url)
                 results.append(res)
                 print(f"RESULT:{json.dumps(res, ensure_ascii=False)}", flush=True)
+
+            ident = await _identity(page, holder, tries=5)
+            if ident:
+                print(f"IDENTITY:{json.dumps(ident, ensure_ascii=False)}", flush=True)
+            await _save_session(ctx)
+            done({"results": results})
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+
+
+_JS_GET = """async ({path, token}) => {
+    const headers = {'Accept': 'application/json'};
+    if (token) headers['X-UserToken'] = token;
+    const r = await fetch(path, {headers, credentials: 'same-origin'});
+    return {status: r.status, text: await r.text()};
+}"""
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
+
+
+async def _get_json(page, token, path: str):
+    try:
+        res = await page.evaluate(_JS_GET, {"path": path, "token": token})
+        return json.loads(res["text"]) if res["status"] == 200 else None
+    except Exception:
+        return None
+
+
+async def _stats_names(page, token, table: str, field: str, values: list[str]) -> dict:
+    """value -> display name for the records of <table> that use these values, from one grouped count."""
+    qs = urlencode({
+        "sysparm_query": f"{field}IN{','.join(values)}", "sysparm_group_by": field,
+        "sysparm_count": "true", "sysparm_display_value": "all",
+    })
+    data = await _get_json(page, token, f"/api/now/stats/{table}?{qs}")
+    out: dict = {}
+    for row in (data or {}).get("result") or []:
+        for g in row.get("groupby_fields") or []:
+            if g.get("field") == field and g.get("value") and g.get("display_value"):
+                out[g["value"]] = g["display_value"]
+    return out
+
+
+async def _lookup_names(page, token, table: str, targets: dict) -> dict:
+    """Readable names for the fields and values a table's conditions use: the field labels, and the names
+    of the people / records (reference fields) and choices they point at. Values that can't be named get ''
+    so they are not asked for again."""
+    meta = await _get_json(page, token, f"/api/now/ui/meta/{table}")
+    cols = ((meta or {}).get("result") or {}).get("columns") or {}
+    fields: dict = {}
+    values: dict = {}
+    for field, vals in targets.items():
+        col = cols.get(field) or {}
+        fields[field] = col.get("label") or field
+        kind = col.get("type")
+        if kind not in ("choice", "reference") and (col or not all(re.fullmatch(r"[0-9a-f]{32}", v) for v in vals)):
+            continue
+        found: dict = {}
+        if kind == "choice":
+            found = {str(c.get("value")): c.get("label") for c in col.get("choices") or [] if c.get("label")}
+        left = [v for v in vals if v not in found]
+        if left:
+            found.update(await _stats_names(page, token, table, field, left))
+        left = [v for v in vals if v not in found]
+        ref = col.get("reference")
+        shown = col.get("reference_display_field") or "name"
+        if left and kind == "reference" and _NAME_RE.match(str(ref or "")) and _NAME_RE.match(shown):
+            qs = urlencode({"sysparm_query": f"sys_idIN{','.join(left)}", "sysparm_fields": f"sys_id,{shown}", "sysparm_limit": len(left)})
+            data = await _get_json(page, token, f"/api/now/table/{ref}?{qs}")
+            for rec in (data or {}).get("result") or []:
+                if rec.get("sys_id") and rec.get(shown):
+                    found[rec["sys_id"]] = rec[shown]
+        values[field] = {v: found.get(v, "") for v in vals}
+    return {"kind": "names", "table": table, "fields": fields, "values": values}
+
+
+async def cmd_names(specs: list[dict]) -> None:
+    """Read the readable names behind the conditions of each {"table", "targets": {field: [values]}}."""
+    from playwright.async_api import async_playwright
+
+    automation_dir = ensure_automation_profile()
+    _prepare_profile(automation_dir)
+    async with async_playwright() as p:
+        status("正在准备…")
+        session = await _ensure_login(p, automation_dir, HOME_URL)
+        if not session:
+            error("登录超时，请重试并在弹出的 Edge 窗口中完成登录")
+            return
+        ctx, page, holder = session
+        try:
+            token = await _get_token(page, holder)
+            for i, spec in enumerate(specs, 1):
+                table = str(spec.get("table") or "")
+                if not _NAME_RE.match(table):
+                    continue
+                status(f"正在读取名称 ({i}/{len(specs)})…")
+                res = await _lookup_names(page, token, table, spec.get("targets") or {})
+                print(f"RESULT:{json.dumps(res, ensure_ascii=False)}", flush=True)
+            await _save_session(ctx)
+            done({"tables": len(specs)})
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+
+
+async def cmd_resolve(urls: list[str]) -> None:
+    """Read the filter behind each Next Experience saved-list link (.../list/params/list-id/<id>/tiny-id/<tiny>)."""
+    from playwright.async_api import async_playwright
+    from app.core import sn_query
+
+    automation_dir = ensure_automation_profile()
+    _prepare_profile(automation_dir)
+    async with async_playwright() as p:
+        status("正在准备…")
+        session = await _ensure_login(p, automation_dir, urls[0])
+        if not session:
+            error("登录超时，请重试并在弹出的 Edge 窗口中完成登录")
+            return
+        ctx, page, holder = session
+        try:
+            results = []
+            for i, url in enumerate(urls, 1):
+                status(f"正在解析已保存列表 ({i}/{len(urls)})…")
+                res = await _resolve_one(page, url)
+                results.append(res)
+                print(f"RESULT:{json.dumps(res, ensure_ascii=False)}", flush=True)
+                if res.get("table") and _NAME_RE.match(res["table"]):
+                    targets = sn_query.name_targets(sn_query.split_query(res.get("query") or "")[0])
+                    if targets:
+                        status("正在读取名称…")
+                        token = await _get_token(page, holder)
+                        names = await _lookup_names(page, token, res["table"], targets)
+                        print(f"RESULT:{json.dumps(names, ensure_ascii=False)}", flush=True)
 
             ident = await _identity(page, holder, tries=5)
             if ident:
@@ -524,8 +736,22 @@ def main() -> None:
                 error("没有需要读取的链接")
                 sys.exit(2)
             asyncio.run(cmd_count(urls))
+        elif cmd == "resolve" and len(sys.argv) >= 4 and sys.argv[2] == "--file":
+            with open(sys.argv[3], encoding="utf-8") as f:
+                urls = json.load(f)
+            if not urls:
+                error("没有需要解析的链接")
+                sys.exit(2)
+            asyncio.run(cmd_resolve(urls))
+        elif cmd == "names" and len(sys.argv) >= 4 and sys.argv[2] == "--file":
+            with open(sys.argv[3], encoding="utf-8") as f:
+                specs = json.load(f)
+            if not specs:
+                error("没有需要读取名称的条件")
+                sys.exit(2)
+            asyncio.run(cmd_names(specs))
         else:
-            error("Usage: servicenow_worker.py count <url>... | count --file <json> | login")
+            error("Usage: servicenow_worker.py count <url>... | count --file <json> | resolve --file <json> | names --file <json> | login")
             sys.exit(2)
     except Exception as e:
         error(f"{type(e).__name__}: {e}")

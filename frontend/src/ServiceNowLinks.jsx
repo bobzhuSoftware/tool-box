@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import LinkComposer from './LinkComposer'
+import ConditionLibrary from './ConditionLibrary'
 import { linkKind, KIND_LABEL } from './useSnLinks'
 
 const OPEN_KEY = 'sn_links_open'
@@ -53,6 +54,7 @@ function ServiceNowLinks({ store, usageCount }) {
   })
   const [editingId, setEditingId] = useState(null) // link id, 'new', or null
   const [composingId, setComposingId] = useState(null) // link whose conditions are being recombined
+  const [libraryOpen, setLibraryOpen] = useState(false)
   const [draft, setDraft] = useState(emptyDraft)
   const [saveError, setSaveError] = useState('')
   const [copiedId, setCopiedId] = useState(null)
@@ -67,13 +69,14 @@ function ServiceNowLinks({ store, usageCount }) {
     localStorage.setItem(KIND_KEY, kind)
   }, [kind])
 
-  const modalOpen = editingId !== null || composingId !== null
+  const modalOpen = editingId !== null || composingId !== null || libraryOpen
   useEffect(() => {
     if (!modalOpen) return undefined
     const onKey = (e) => {
       if (e.key !== 'Escape' || saving) return
       setEditingId(null)
       setComposingId(null)
+      setLibraryOpen(false)
       setSaveError('')
     }
     window.addEventListener('keydown', onKey)
@@ -142,6 +145,13 @@ function ServiceNowLinks({ store, usageCount }) {
     if (!res.ok) return res.error || '保存失败'
     setComposingId(null)
     return ''
+  }
+
+  // Saves a link built in the condition library; the library stays open so more links can be built.
+  const saveFromLibrary = async (entry) => {
+    if (links.length >= MAX_LINKS) return `最多保存 ${MAX_LINKS} 条链接`
+    const res = await store.persist([...links, { id: newId(), ...entry }])
+    return res.ok ? '' : res.error || '保存失败'
   }
 
   const startCompose = (link) => {
@@ -251,9 +261,14 @@ function ServiceNowLinks({ store, usageCount }) {
           <span className="sn-links-caret">{open ? '▸' : '◂'}</span>
           🔖 常用链接{loaded ? ` (${links.length})` : ''}
         </button>
-        <button className="btn-outline btn-sm" onClick={startAdd} disabled={!loaded || editingId === 'new'}>
-          ＋ 添加
-        </button>
+        <div className="sn-links-bar-actions">
+          <button className="btn-outline btn-sm" onClick={() => setLibraryOpen(true)} disabled={!loaded} title="管理条件，并用条件直接生成链接">
+            🧩 条件
+          </button>
+          <button className="btn-outline btn-sm" onClick={startAdd} disabled={!loaded || editingId === 'new'}>
+            ＋ 添加
+          </button>
+        </div>
       </div>
 
       {open && (
@@ -343,6 +358,20 @@ function ServiceNowLinks({ store, usageCount }) {
               api={store.api}
               onSave={saveComposed}
               onCancel={() => setComposingId(null)}
+            />
+          </div>
+        </div>,
+        document.body,
+      )}
+      {libraryOpen && createPortal(
+        <div className="sn-modal-backdrop">
+          <div className="sn-modal sn-modal-xl" role="dialog" aria-modal="true" aria-label="条件库">
+            <ConditionLibrary
+              links={links}
+              api={store.api}
+              stream={store.stream}
+              onSave={saveFromLibrary}
+              onClose={() => setLibraryOpen(false)}
             />
           </div>
         </div>,
