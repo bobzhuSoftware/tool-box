@@ -84,6 +84,9 @@
 .sn-chip-busy { color: #4338ca; }
 @keyframes sn-pulse { 50% { opacity: 0.3; } }
 .sn-menu-push { margin-left: auto; }
+.sn-split { display: flex; align-items: stretch; gap: 3px; }
+.sn-split .sn-menu-wrap, .sn-split .sn-menu-btn { height: 100%; }
+.sn-split .sn-menu-btn { font-size: 0.8rem; padding: 0 0.5rem; }
 .sn-menu-wrap { position: relative; }
 .sn-menu-btn { padding: 0.1rem 0.6rem; font-size: 1.1rem; line-height: 1.2; }
 .sn-menu { position: absolute; top: calc(100% + 4px); z-index: 10; min-width: 9rem; display: flex; flex-direction: column; padding: 0.25rem; border: 1px solid #ddd; border-radius: 8px; background: #fff; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12); }

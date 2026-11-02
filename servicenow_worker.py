@@ -35,13 +35,14 @@ import re
 import shutil
 import sys
 import time
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 from browser_utils import (  # noqa: E402
     _robust_copy, ensure_automation_profile, get_automation_user_data_dir,
 )
+from app.core import sn_query  # noqa: E402
 
 LOGIN_WAIT_SECS = 300
 HEADLESS_SSO_SECS = 30
@@ -67,45 +68,6 @@ def error(msg: str) -> None:
 
 def done(data: dict) -> None:
     print(f"DONE:{json.dumps(data, ensure_ascii=False)}", flush=True)
-
-
-def _classic_target(url: str) -> str:
-    """Return '<table>_list.do[?params]' from a classic list URL, or ''.
-
-    Handles /now/nav/ui/classic/params/target/<double-encoded target>, nav_to.do?uri=..., and
-    a direct https://host/<table>_list.do?sysparm_query=... link.
-    """
-    p = urlparse(url)
-    m = re.search(r"/target/(.+)$", unquote(p.path))
-    if m:
-        return m.group(1)
-    if p.path.endswith("/nav_to.do"):
-        return parse_qs(p.query).get("uri", [""])[0]
-    if re.search(r"[^/]+_list\.do$", p.path):
-        return p.path.rsplit("/", 1)[1] + (f"?{p.query}" if p.query else "")
-    return ""
-
-
-def parse_list_url(url: str) -> dict:
-    """Extract table / encoded query / list title from a Next Experience simplelist URL or a
-    classic list URL (<table>_list.do?sysparm_query=...)."""
-    path = urlparse(url).path
-    m = re.search(r"/simplelist/([^/]+)", path)
-    if m:
-        q = re.search(r"/query/(.+)$", path)
-        t = re.search(r"/list-title/([^/]+)", path)
-        return {
-            "table": m.group(1),
-            "query": unquote(q.group(1)) if q else "",
-            "title": unquote(t.group(1)) if t else "",
-        }
-
-    target = _classic_target(url)
-    tm = re.match(r"/?([A-Za-z0-9_]+)_list\.do(?:\?(.*))?$", target)
-    if tm:
-        query = parse_qs(tm.group(2) or "").get("sysparm_query", [""])[0]
-        return {"table": tm.group(1), "query": query, "title": ""}
-    return {"table": "", "query": "", "title": ""}
 
 
 def _on_servicenow(url: str) -> bool:
@@ -375,7 +337,7 @@ async def _capture_list_count(resp, captured: list) -> None:
 
 
 async def _count_one(page, holder: dict, url: str) -> dict:
-    info = parse_list_url(url)
+    info = sn_query.parse_list_url(url)
     if not info["table"]:
         return {"url": url, "count": None, "source": None, "error": "URL 无法解析表名（需要 simplelist 或经典 _list.do 链接）"}
 
@@ -413,10 +375,11 @@ async def _count_page(page, holder: dict, url: str, info: dict, captured: list) 
             status("REST 返回 0，用页面再确认…")
         else:
             status(f"REST 统计接口返回 {res['status']}，改用页面读取…")
-            rest_err = f"REST 返回 {res['status']}"
+            rest_err = f"统计接口返回 {res['status']}，页面也未能读到数字"
     except Exception as e:
+        # Keep the raw reason in the progress log; the cell only gets a friendly message.
         status(f"REST 统计失败（{e}），改用页面读取…")
-        rest_err = f"REST 失败：{e}"
+        rest_err = "统计接口请求失败，页面也未能读到数字"
 
     n = await _read_page_count(page, info, captured, tries=30 if rest_count is None else 20)
     if n is None and rest_count == 0:
@@ -489,8 +452,6 @@ async def _capture_tiny_layout(resp, captured: list) -> None:
 
 
 async def _resolve_one(page, url: str) -> dict:
-    from app.core import sn_query
-
     info = sn_query.parse_list_url(url)
     if info["kind"] != "savedlist":
         return {"url": url, "error": "不是已保存列表链接"}
@@ -523,6 +484,27 @@ async def _resolve_one(page, url: str) -> dict:
         page.remove_listener("response", handler)
 
 
+def _emit_result(res: dict) -> None:
+    print(f"RESULT:{json.dumps(res, ensure_ascii=False)}", flush=True)
+
+
+async def _rest_count_fast(page, token, info: dict):
+    """One stats REST call on the page we're already on (no navigation). Returns the int count (may be 0),
+    or None when the call can't be used (non-200 or malformed) so the caller falls back to the page read."""
+    try:
+        res = await page.evaluate(
+            _JS_STATS, {"table": info["table"], "query": info["query"], "token": token}
+        )
+    except Exception:
+        return None
+    if res["status"] != 200:
+        return None
+    try:
+        return int(json.loads(res["text"])["result"]["stats"]["count"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 async def cmd_count(urls: list[str]) -> None:
     from playwright.async_api import async_playwright
 
@@ -536,12 +518,34 @@ async def cmd_count(urls: list[str]) -> None:
             return
         ctx, page, holder = session
         try:
-            results = []
-            for i, url in enumerate(urls, 1):
-                status(f"正在读取链接 ({i}/{len(urls)})…")
+            results: list = [None] * len(urls)
+
+            # Fast pass: read each count straight from the stats REST API on the page we're already on,
+            # without navigating to every list. A link on another ServiceNow instance, or one REST can't
+            # confirm (0 / error, e.g. an unreadable sys_tags condition), is deferred to the page read below.
+            token = await _get_token(page, holder)
+            page_host = urlparse(page.url).netloc
+            deferred: list = []
+            for i, url in enumerate(urls):
+                info = sn_query.parse_list_url(url)
+                fast = None
+                if token and info["table"] and urlparse(url).netloc == page_host:
+                    status(f"正在快速读取 ({i + 1}/{len(urls)})…")
+                    n = await _rest_count_fast(page, token, info)
+                    if n is not None and n > 0:
+                        fast = {"url": url, "count": n, "source": "rest"}
+                if fast is not None:
+                    results[i] = fast
+                    _emit_result(fast)
+                else:
+                    deferred.append((i, url))
+
+            # Slow pass: links REST couldn't confirm are read from the list page (GraphQL / classic frame).
+            for n, (i, url) in enumerate(deferred, 1):
+                status(f"正在逐个确认 ({n}/{len(deferred)})…")
                 res = await _count_one(page, holder, url)
-                results.append(res)
-                print(f"RESULT:{json.dumps(res, ensure_ascii=False)}", flush=True)
+                results[i] = res
+                _emit_result(res)
 
             ident = await _identity(page, holder, tries=5)
             if ident:
@@ -655,7 +659,6 @@ async def cmd_names(specs: list[dict]) -> None:
 async def cmd_resolve(urls: list[str]) -> None:
     """Read the filter behind each Next Experience saved-list link (.../list/params/list-id/<id>/tiny-id/<tiny>)."""
     from playwright.async_api import async_playwright
-    from app.core import sn_query
 
     automation_dir = ensure_automation_profile()
     _prepare_profile(automation_dir)

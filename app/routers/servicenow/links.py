@@ -1,120 +1,25 @@
-"""ServiceNow count tables: saved table layouts, login identities, and worker runs (Edge automation)."""
-import asyncio
+"""ServiceNow saved links, condition composer, condition library, import and link builder."""
 import json
-import os
-import queue as stdlib_queue
-import re
-import shutil
-import tempfile
-import threading
-import uuid
 from typing import Literal
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
 from app.core import sn_query
 from app.core.auth import require_user
-from app.core.db import User, engine
-from app.core.settings import _get_user_setting, _set_user_setting
+from app.core.db import User
+from app.core.settings import _set_user_setting
+
+from .accounts import _load_accounts, _require_account
+from .common import (
+    _ALIAS_RE, _CONDITION_LIBRARY_KEY, _CONDITION_NAMES_KEY, _CONDITION_TABLES_KEY, _LINKS_KEY,
+    _MAX_BUILD_CONDITIONS, _MAX_CONDITION_NAMES, _MAX_IMPORT_URLS, _MAX_LIBRARY_CONDITIONS, _MAX_LINKS,
+    _MAX_NAME_ENTRIES, _MAX_NAME_FIELDS, _MAX_NAME_TABLES, _MAX_NAME_VALUES, _TABLE_RE, _VALUE_NAMES_KEY,
+    _is_servicenow_url, _load_json_setting, _load_model_setting,
+)
+from .worker import _stream_worker
 
 router = APIRouter()
-
-# Repo root (two levels up from app/routers/), where the *_worker.py scripts live.
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-
-_SETTING_KEY = "servicenow_tables"
-_ACCOUNTS_KEY = "servicenow_accounts"
-_LINKS_KEY = "servicenow_links"
-_CONDITION_NAMES_KEY = "servicenow_condition_names"
-_MAX_CONDITION_NAMES = 500
-_CONDITION_LIBRARY_KEY = "servicenow_condition_library"
-_CONDITION_TABLES_KEY = "servicenow_condition_tables"
-_VALUE_NAMES_KEY = "servicenow_value_names"
-_MAX_NAME_ENTRIES = 5000
-_MAX_NAME_TABLES = 30
-_MAX_NAME_FIELDS = 60
-_MAX_NAME_VALUES = 200
-_MAX_LIBRARY_CONDITIONS = 1000
-_MAX_IMPORT_URLS = 20
-_TABLE_RE = re.compile(r"^[A-Za-z0-9_]{1,80}$")
-_MAX_BUILD_CONDITIONS = 60
-_MAX_LINKS = 200
-_ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,19}$")
-_MAX_URLS = 200
-_DEFAULT_ACCOUNT_ID = "default"
-_ACCOUNT_ID_RE = re.compile(r"^[a-z0-9]{1,16}$")
-_USER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
-
-# One worker at a time: login/refresh/logout all touch the same Edge profiles.
-_run_lock = threading.Lock()
-
-_DEFAULT_URL = (
-    "https://dsv.service-now.com/x/dsva2/enterprise-integrations/simplelist/x_dsva2_enterpri_0_edi_case"
-    "/params/list-title/Cases%20Received%20in%20past%207%20days%20Blue/query/"
-    "origin_of_request!%3Dschenker_origin%5Estate!%3D1000%5Estate!%3D1300"
-    "%5Edivision%3D420b49d01b3ae5103620b6c5464bcb89"
-    "%5Esys_created_onBETWEENjavascript%3Ags.beginningOfLast7Days()%40javascript%3Ags.endOfToday()"
-    "%5Eassignment_group!%3D2dafd3ec2b6d7690db00f454c891bf54"
-)
-
-
-# ---------------------------------------------------------------------------
-# Table layouts
-# ---------------------------------------------------------------------------
-class SnTable(BaseModel):
-    id: str
-    title: str = ""
-    rows: list[str] = []
-    cols: list[str] = []
-    # "<row>,<col>" -> ServiceNow list URL
-    cells: dict[str, str] = {}
-    # "c<idx>" / "r<idx>" -> indices of the columns / rows that total column / row adds up
-    sums: dict[str, list[int]] = {}
-
-
-class SnConfig(BaseModel):
-    tables: list[SnTable] = []
-
-
-def _default_config() -> SnConfig:
-    return SnConfig(
-        tables=[
-            SnTable(
-                id="default",
-                title="All",
-                rows=["Blue", "Red"],
-                cols=["Opened", "Unassigned Requested", "Unassigned Pre-Sales"],
-                cells={"0,0": _DEFAULT_URL},
-            )
-        ]
-    )
-
-
-def _is_servicenow_url(url: str) -> bool:
-    p = urlparse(url)
-    host = (p.hostname or "").lower()
-    return p.scheme == "https" and (host == "service-now.com" or host.endswith(".service-now.com"))
-
-
-@router.get("/api/servicenow/config")
-def get_config(user: User = Depends(require_user)) -> SnConfig:
-    raw = _get_user_setting(user.id, _SETTING_KEY)
-    if not raw:
-        return _default_config()
-    try:
-        return SnConfig(**json.loads(raw))
-    except (TypeError, ValueError):
-        return _default_config()
-
-
-@router.post("/api/servicenow/config")
-def save_config(cfg: SnConfig, user: User = Depends(require_user)) -> SnConfig:
-    _set_user_setting(user.id, _SETTING_KEY, cfg.model_dump_json())
-    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +40,7 @@ class SnLinks(BaseModel):
 
 @router.get("/api/servicenow/links")
 def get_links(user: User = Depends(require_user)) -> SnLinks:
-    raw = _get_user_setting(user.id, _LINKS_KEY)
-    if not raw:
-        return SnLinks()
-    try:
-        return SnLinks(**json.loads(raw))
-    except (TypeError, ValueError):
-        return SnLinks()
+    return _load_model_setting(user.id, _LINKS_KEY, SnLinks, SnLinks)
 
 
 @router.post("/api/servicenow/links")
@@ -184,10 +83,8 @@ def save_links(body: SnLinks, user: User = Depends(require_user)) -> SnLinks:
 # Condition composer: split saved links into condition fragments and recombine them
 # ---------------------------------------------------------------------------
 def _condition_names(user_id: str) -> dict[str, str]:
-    raw = _get_user_setting(user_id, _CONDITION_NAMES_KEY)
-    try:
-        data = json.loads(raw) if raw else {}
-    except ValueError:
+    data = _load_json_setting(user_id, _CONDITION_NAMES_KEY, dict)
+    if not isinstance(data, dict):
         return {}
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
@@ -195,11 +92,7 @@ def _condition_names(user_id: str) -> dict[str, str]:
 def _load_value_names(user_id: str) -> dict[str, dict]:
     """table -> {"fields": {field: label}, "values": {field: {value: name}}}: names read from ServiceNow,
     only used to show conditions in a readable way (the conditions themselves are never changed)."""
-    raw = _get_user_setting(user_id, _VALUE_NAMES_KEY)
-    try:
-        data = json.loads(raw) if raw else {}
-    except ValueError:
-        return {}
+    data = _load_json_setting(user_id, _VALUE_NAMES_KEY, dict)
     return {t: d for t, d in data.items() if isinstance(t, str) and isinstance(d, dict)} if isinstance(data, dict) else {}
 
 
@@ -329,11 +222,7 @@ class SnLibraryEntry(BaseModel):
 
 
 def _load_library(user_id: str) -> list[SnLibraryEntry]:
-    raw = _get_user_setting(user_id, _CONDITION_LIBRARY_KEY)
-    try:
-        data = json.loads(raw) if raw else []
-    except ValueError:
-        return []
+    data = _load_json_setting(user_id, _CONDITION_LIBRARY_KEY, list)
     out: list[SnLibraryEntry] = []
     for item in data if isinstance(data, list) else []:
         try:
@@ -349,11 +238,7 @@ def _save_library(user_id: str, library: list[SnLibraryEntry]) -> None:
 
 def _load_origins(user_id: str) -> dict[str, dict[str, str]]:
     """table -> {host, app_path}: where to point a link built for that table."""
-    raw = _get_user_setting(user_id, _CONDITION_TABLES_KEY)
-    try:
-        data = json.loads(raw) if raw else {}
-    except ValueError:
-        return {}
+    data = _load_json_setting(user_id, _CONDITION_TABLES_KEY, dict)
     out: dict[str, dict[str, str]] = {}
     for table, o in data.items() if isinstance(data, dict) else []:
         if isinstance(table, str) and isinstance(o, dict):
@@ -761,6 +646,9 @@ def import_conditions(body: SnImportConfirm, user: User = Depends(require_user))
     return SnImportResult(library=_library_response(user.id, links), added=added, existing=existing)
 
 
+# ---------------------------------------------------------------------------
+# Link builder: recombine condition fragments into a classic or simplelist URL
+# ---------------------------------------------------------------------------
 class SnBuildRequest(BaseModel):
     # Either a saved link to take the table and host from, or a table known to the condition library.
     base_id: str = ""
@@ -824,340 +712,3 @@ def build_link(body: SnBuildRequest, user: User = Depends(require_user)) -> SnBu
     if len(url) > 4000 or not _is_servicenow_url(url):
         raise HTTPException(status_code=400, detail="生成的链接无效或过长")
     return SnBuildResponse(url=url, query=query)
-
-
-# ---------------------------------------------------------------------------
-# Login identities: each has its own Edge profile dir + cookie file on disk
-# ---------------------------------------------------------------------------
-class Account(BaseModel):
-    id: str
-    name: str
-    user_name: str = ""
-    display_name: str = ""
-
-
-class AccountsState(BaseModel):
-    accounts: list[Account] = []
-    selected: str = _DEFAULT_ACCOUNT_ID
-
-
-class AccountName(BaseModel):
-    name: str
-
-
-class AccountSelect(BaseModel):
-    id: str
-
-
-def _load_accounts(user_id: str) -> AccountsState:
-    raw = _get_user_setting(user_id, _ACCOUNTS_KEY)
-    state = AccountsState()
-    if raw:
-        try:
-            state = AccountsState(**json.loads(raw))
-        except (TypeError, ValueError):
-            state = AccountsState()
-    if not state.accounts:
-        state.accounts = [Account(id=_DEFAULT_ACCOUNT_ID, name="默认")]
-    if state.selected not in {a.id for a in state.accounts}:
-        state.selected = state.accounts[0].id
-    return state
-
-
-def _save_accounts(user_id: str, state: AccountsState) -> None:
-    _set_user_setting(user_id, _ACCOUNTS_KEY, state.model_dump_json())
-
-
-def _data_root() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
-    return os.path.join(base, "VideoTranscript", "servicenow")
-
-
-def _account_dir(user_id: str, acc_id: str) -> str:
-    # Both parts become path segments, so only accept strictly safe values.
-    if not _USER_ID_RE.match(user_id) or not _ACCOUNT_ID_RE.match(acc_id):
-        raise HTTPException(status_code=400, detail="无效的身份标识")
-    return os.path.join(_data_root(), user_id, acc_id)
-
-
-def _session_path(user_id: str, acc_id: str) -> str:
-    return os.path.join(_account_dir(user_id, acc_id), "session.json")
-
-
-def _legacy_session_path() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
-    return os.path.join(base, "VideoTranscript", "servicenow-session.json")
-
-
-def _is_first_user(user_id: str) -> bool:
-    with Session(engine) as s:
-        first = s.query(User).order_by(User.created_at, User.id).first()
-        return bool(first and first.id == user_id)
-
-
-def _migrate_legacy_session(user_id: str) -> None:
-    """Hand the pre-identity cookie file to the default identity of the first (owner) user only."""
-    legacy = _legacy_session_path()
-    if not os.path.isfile(legacy) or not _is_first_user(user_id):
-        return
-    target = _session_path(user_id, _DEFAULT_ACCOUNT_ID)
-    if os.path.exists(target):
-        return
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    shutil.move(legacy, target)
-
-
-def _account_payload(user_id: str, state: AccountsState) -> dict:
-    return {
-        "selected": state.selected,
-        "accounts": [
-            {**a.model_dump(), "logged_in": os.path.isfile(_session_path(user_id, a.id))}
-            for a in state.accounts
-        ],
-    }
-
-
-def _clean_name(name: str) -> str:
-    name = name.strip()
-    if not 1 <= len(name) <= 40:
-        raise HTTPException(status_code=400, detail="名称长度需要在 1 到 40 个字符之间")
-    return name
-
-
-def _require_account(state: AccountsState, acc_id: str) -> Account:
-    for a in state.accounts:
-        if a.id == acc_id:
-            return a
-    raise HTTPException(status_code=404, detail="身份不存在")
-
-
-def _require_idle() -> None:
-    if _run_lock.locked():
-        raise HTTPException(status_code=409, detail="已有任务在运行，请稍后再试")
-
-
-@router.get("/api/servicenow/accounts")
-def list_accounts(user: User = Depends(require_user)):
-    _migrate_legacy_session(user.id)
-    return _account_payload(user.id, _load_accounts(user.id))
-
-
-@router.post("/api/servicenow/accounts")
-def create_account(req: AccountName, user: User = Depends(require_user)):
-    state = _load_accounts(user.id)
-    acc = Account(id=uuid.uuid4().hex[:8], name=_clean_name(req.name))
-    state.accounts.append(acc)
-    state.selected = acc.id
-    _save_accounts(user.id, state)
-    return _account_payload(user.id, state)
-
-
-@router.post("/api/servicenow/accounts/select")
-def select_account(req: AccountSelect, user: User = Depends(require_user)):
-    state = _load_accounts(user.id)
-    _require_account(state, req.id)
-    state.selected = req.id
-    _save_accounts(user.id, state)
-    return _account_payload(user.id, state)
-
-
-@router.put("/api/servicenow/accounts/{acc_id}")
-def rename_account(acc_id: str, req: AccountName, user: User = Depends(require_user)):
-    state = _load_accounts(user.id)
-    _require_account(state, acc_id).name = _clean_name(req.name)
-    _save_accounts(user.id, state)
-    return _account_payload(user.id, state)
-
-
-@router.delete("/api/servicenow/accounts/{acc_id}")
-def delete_account(acc_id: str, user: User = Depends(require_user)):
-    state = _load_accounts(user.id)
-    _require_account(state, acc_id)
-    if len(state.accounts) <= 1:
-        raise HTTPException(status_code=400, detail="至少需要保留一个身份")
-    _require_idle()
-    shutil.rmtree(_account_dir(user.id, acc_id), ignore_errors=True)
-    state.accounts = [a for a in state.accounts if a.id != acc_id]
-    if state.selected == acc_id:
-        state.selected = state.accounts[0].id
-    _save_accounts(user.id, state)
-    return _account_payload(user.id, state)
-
-
-@router.post("/api/servicenow/accounts/{acc_id}/logout")
-def clear_login(acc_id: str, user: User = Depends(require_user)):
-    state = _load_accounts(user.id)
-    acc = _require_account(state, acc_id)
-    _require_idle()
-    shutil.rmtree(_account_dir(user.id, acc_id), ignore_errors=True)
-    acc.user_name = ""
-    acc.display_name = ""
-    _save_accounts(user.id, state)
-    return _account_payload(user.id, state)
-
-
-# ---------------------------------------------------------------------------
-# Worker runs (SSE)
-# ---------------------------------------------------------------------------
-def _remember_identity(user_id: str, acc_id: str, ident: dict) -> None:
-    state = _load_accounts(user_id)
-    for a in state.accounts:
-        if a.id == acc_id:
-            a.user_name = str(ident.get("user_name", ""))
-            a.display_name = str(ident.get("display_name", ""))
-    _save_accounts(user_id, state)
-
-
-def _kill_tree(pid: int) -> None:
-    import subprocess as _sp
-
-    if os.name == "nt":
-        _sp.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
-    else:
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-
-
-def _stream_worker(
-    user: User, acc_id: str, worker_args: list[str], urls: list | None = None, on_result=None
-):
-    """Spawn servicenow_worker.py for one identity and stream its output as SSE (caller holds no lock).
-    `urls` is the JSON input handed to the worker with --file; `on_result(data)` sees every RESULT on the server."""
-    import subprocess as _sp
-    import sys as _sys
-
-    acc_dir = _account_dir(user.id, acc_id)
-    if not _run_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="已有任务在运行，请稍后再试")
-
-    edge_profile = _get_user_setting(user.id, "edge_profile") or ""
-    q: stdlib_queue.Queue = stdlib_queue.Queue()
-    live: dict = {"proc": None}
-
-    def run_worker():
-        url_file = None
-        got_final = False
-        final: dict = {"type": "error", "message": "读取进程异常退出"}
-        try:
-            if acc_id == _DEFAULT_ACCOUNT_ID:
-                _migrate_legacy_session(user.id)
-            os.makedirs(acc_dir, exist_ok=True)
-            args = list(worker_args)
-            if urls is not None:
-                fd, url_file = tempfile.mkstemp(prefix="vt_sn_", suffix=".json")
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(urls, f)
-                args += ["--file", url_file]
-
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
-            env["VT_EDGE_AUTOMATION_DIR"] = os.path.join(acc_dir, "edge")
-            env["VT_SN_SESSION_FILE"] = os.path.join(acc_dir, "session.json")
-            if edge_profile:
-                env["VT_EDGE_PROFILE"] = edge_profile  # only selects which profile seeds the config files
-            # Own process group: a Ctrl+C aimed at uvicorn (reload/shutdown) must not reach the worker.
-            proc = _sp.Popen(
-                [_sys.executable, os.path.join(_REPO_ROOT, "servicenow_worker.py"), *args],
-                stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, encoding="utf-8", env=env,
-                creationflags=getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0),
-            )
-            live["proc"] = proc
-            stderr_lines: list = []
-            threading.Thread(target=lambda: stderr_lines.extend(proc.stderr), daemon=True).start()
-
-            for raw_line in proc.stdout:
-                line = raw_line.rstrip("\n")
-                if line.startswith("STATUS:"):
-                    q.put({"type": "status", "message": line[7:]})
-                elif line.startswith("STAGE:"):
-                    q.put({"type": "stage", "stage": line[6:]})
-                elif line.startswith("RESULT:"):
-                    try:
-                        data = json.loads(line[7:])
-                    except ValueError:
-                        continue
-                    if on_result:
-                        try:
-                            on_result(data)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    q.put({"type": "result", "data": data})
-                elif line.startswith("IDENTITY:"):
-                    try:
-                        ident = json.loads(line[9:])
-                    except ValueError:
-                        continue
-                    _remember_identity(user.id, acc_id, ident)
-                    q.put({"type": "identity", "data": ident})
-                elif line.startswith("DONE:"):
-                    final, got_final = {"type": "done"}, True
-                elif line.startswith("ERROR:"):
-                    final, got_final = {"type": "error", "message": line[6:]}, True
-            proc.wait()
-            tail = "".join(stderr_lines).strip()[-400:]
-            if not got_final and tail:
-                final = {"type": "error", "message": tail}
-        except Exception as e:  # noqa: BLE001
-            final = {"type": "error", "message": str(e)}
-        finally:
-            if url_file:
-                try:
-                    os.unlink(url_file)
-                except OSError:
-                    pass
-            _run_lock.release()
-            # Sent after the lock is free so the client can start the next action right away.
-            q.put(final)
-
-    threading.Thread(target=run_worker, daemon=True).start()
-
-    async def generate():
-        try:
-            while True:
-                try:
-                    event = q.get_nowait()
-                except stdlib_queue.Empty:
-                    await asyncio.sleep(0.15)
-                    continue
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event["type"] in ("done", "error"):
-                    break
-        finally:
-            # Client gone or server shutting down: don't leave the worker (and the run lock) hanging.
-            proc = live["proc"]
-            if proc is not None and proc.poll() is None:
-                _kill_tree(proc.pid)
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-class SnRunRequest(BaseModel):
-    urls: list[str]
-    account: str = ""
-
-
-@router.post("/api/servicenow/run/stream")
-async def run_stream(req: SnRunRequest, user: User = Depends(require_user)):
-    urls = list(dict.fromkeys(u.strip() for u in req.urls if u.strip()))
-    if not urls:
-        raise HTTPException(status_code=400, detail="没有可读取的链接")
-    if len(urls) > _MAX_URLS:
-        raise HTTPException(status_code=400, detail=f"链接过多（最多 {_MAX_URLS} 个）")
-    if any(not _is_servicenow_url(u) for u in urls):
-        raise HTTPException(status_code=400, detail="只支持 https://*.service-now.com 的链接")
-
-    state = _load_accounts(user.id)
-    acc = _require_account(state, req.account or state.selected)
-    return _stream_worker(user, acc.id, ["count"], urls=urls)
-
-
-@router.post("/api/servicenow/accounts/{acc_id}/login/stream")
-async def login_stream(acc_id: str, user: User = Depends(require_user)):
-    acc = _require_account(_load_accounts(user.id), acc_id)
-    return _stream_worker(user, acc.id, ["login"])

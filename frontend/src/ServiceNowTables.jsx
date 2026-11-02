@@ -1,193 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
 import useSSEStream from './useSSEStream'
 import ServiceNowLinks from './ServiceNowLinks'
 import LinkCellInput from './LinkCellInput'
 import useSnLinks, { REF_PREFIX } from './useSnLinks'
 import { parseFormula, evaluateFormula, formulaMentions } from './formula'
 import { moveAxis } from './tableMove'
+import ActionMenu from './SnActionMenu'
+import SumPicker from './SnSumPicker'
+import {
+  emptyCounts, countsKey, loadCounts, cellKey, removeIndex, removeSumIndex,
+  urlProblem, shortError, sourceSuffix, UNCONFIRMED_HINT, formatUpdated,
+} from './serviceNowUtils'
 import './ServiceNowTables.css'
-
-const emptyCounts = { values: {}, at: null }
-
-// Numbers differ per login identity, so each identity keeps its own cache.
-const countsKey = (accId) => `sn_counts:${accId}`
-
-const loadCounts = (accId) => {
-  try {
-    return JSON.parse(localStorage.getItem(countsKey(accId))) || emptyCounts
-  } catch {
-    return emptyCounts
-  }
-}
-
-const cellKey = (r, c) => `${r},${c}`
-
-// Re-key cell URLs after removing a row (axis 'r') or column (axis 'c').
-const removeIndex = (cells, axis, idx) => {
-  const out = {}
-  for (const [k, url] of Object.entries(cells)) {
-    const [r, c] = k.split(',').map(Number)
-    const n = axis === 'r' ? r : c
-    if (n === idx) continue
-    const nr = axis === 'r' && r > idx ? r - 1 : r
-    const nc = axis === 'c' && c > idx ? c - 1 : c
-    out[cellKey(nr, nc)] = url
-  }
-  return out
-}
-
-// Same re-indexing for total rows/columns: a total on `axis` is keyed and lists members on that axis.
-const removeSumIndex = (sums, axis, idx) => {
-  const shift = (i) => (i > idx ? i - 1 : i)
-  const out = {}
-  for (const [key, members] of Object.entries(sums)) {
-    if (key[0] !== axis) { out[key] = members; continue }
-    const n = Number(key.slice(1))
-    if (n === idx) continue
-    out[`${axis}${shift(n)}`] = members.filter((i) => i !== idx).map(shift)
-  }
-  return out
-}
-
-// Mirrors the server rule (https://*.service-now.com) plus the list forms the worker can parse.
-const urlProblem = (url) => {
-  const u = url.trim()
-  if (!u) return ''
-  let parsed
-  try {
-    parsed = new URL(u)
-  } catch {
-    return '不是有效的链接'
-  }
-  const host = parsed.hostname.toLowerCase()
-  if (parsed.protocol !== 'https:' || !(host === 'service-now.com' || host.endsWith('.service-now.com'))) {
-    return '只支持 https://*.service-now.com 的链接'
-  }
-  const isList = parsed.pathname.includes('/simplelist/') || /_list\.do/i.test(`${parsed.pathname}${parsed.search}`)
-  if (!isList) return '不是 simplelist 或经典 _list.do 列表链接'
-  return ''
-}
-
-const shortError = (s) => (s.length > 16 ? `${s.slice(0, 16)}…` : s)
-
-const SOURCE_NAMES = { rest: 'REST 接口', dom: '页面' }
-const sourceSuffix = (source) => (SOURCE_NAMES[source] ? `（${SOURCE_NAMES[source]}）` : '')
-const UNCONFIRMED_HINT = 'REST 返回 0，页面未能确认，数字可能不准，请在 ServiceNow 里核对'
-
-const formatUpdated = (iso) => {
-  const d = new Date(iso)
-  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString() : d.toLocaleString()
-}
-
-function ActionMenu({ title, items, disabled, align = 'right' }) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef(null)
-
-  useEffect(() => {
-    if (!open) return undefined
-    const onDown = (e) => { if (!ref.current?.contains(e.target)) setOpen(false) }
-    const onKey = (e) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  useEffect(() => { if (disabled) setOpen(false) }, [disabled])
-
-  return (
-    <div className="sn-menu-wrap" ref={ref}>
-      <button
-        className="btn-outline btn-sm sn-menu-btn"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={title}
-        title={title}
-        onClick={() => setOpen((o) => !o)}
-        disabled={disabled}
-      >
-        ⋯
-      </button>
-      {open && (
-        <div className={`sn-menu sn-menu-${align}`} role="menu">
-          {items.map((it, i) =>
-            it.sep ? (
-              <div key={i} className="sn-menu-sep" />
-            ) : (
-              <button
-                key={i}
-                role="menuitem"
-                className={`sn-menu-item ${it.danger ? 'sn-danger' : ''}`}
-                disabled={it.disabled}
-                onClick={() => { setOpen(false); it.onClick() }}
-              >
-                {it.label}
-              </button>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// Edit-mode picker for the rows/columns a total adds up. The list opens in a fixed-position popover
-// (portaled to <body>) so it neither stretches the header cell nor gets clipped by the scrolling table.
-function SumPicker({ names, isSum, members, onToggle }) {
-  const [pos, setPos] = useState(null)
-  const btnRef = useRef(null)
-  const menuRef = useRef(null)
-  const open = !!pos
-  const candidates = names.map((name, i) => ({ name, i })).filter(({ i }) => !isSum(i))
-
-  useEffect(() => {
-    if (!open) return undefined
-    const inside = (e) => btnRef.current?.contains(e.target) || menuRef.current?.contains(e.target)
-    const onDown = (e) => { if (!inside(e)) setPos(null) }
-    const onScroll = (e) => { if (!menuRef.current?.contains(e.target)) setPos(null) }
-    const onKey = (e) => { if (e.key === 'Escape') setPos(null) }
-    const close = () => setPos(null)
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    window.addEventListener('scroll', onScroll, true)
-    window.addEventListener('resize', close)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-      window.removeEventListener('scroll', onScroll, true)
-      window.removeEventListener('resize', close)
-    }
-  }, [open])
-
-  const toggleOpen = () => {
-    if (open) { setPos(null); return }
-    const rect = btnRef.current.getBoundingClientRect()
-    setPos({ top: rect.bottom + 2, left: Math.min(rect.left, window.innerWidth - 260) })
-  }
-
-  return (
-    <>
-      <button ref={btnRef} className="sn-sum-btn" aria-expanded={open} onClick={toggleOpen}>
-        汇总 {members.filter((m) => !isSum(m)).length}/{candidates.length} ▾
-      </button>
-      {open && createPortal(
-        <div className="sn-sum-menu" ref={menuRef} style={{ top: pos.top, left: pos.left }}>
-          {candidates.map(({ name, i }) => (
-            <label key={i}>
-              <input type="checkbox" checked={members.includes(i)} onChange={() => onToggle(i)} />
-              <span>{name || '（空）'}</span>
-            </label>
-          ))}
-          {!candidates.length && <span className="sn-ref-none">没有可汇总的行/列</span>}
-        </div>,
-        document.body
-      )}
-    </>
-  )
-}
 
 function ServiceNowTables({ token, onAuthError }) {
   const [tables, setTables] = useState([])
@@ -216,6 +40,9 @@ function ServiceNowTables({ token, onAuthError }) {
   const focusHead = useRef(null) // header just added; focused (and scrolled into view) after render
   const tokenRef = useRef(token)
   tokenRef.current = token
+  // Throttle localStorage writes during a refresh; latestCounts holds the final value to flush.
+  const latestCounts = useRef(null)
+  const lastPersist = useRef(0)
 
   const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {})
   const jsonHeaders = () => ({ 'Content-Type': 'application/json', ...authHeaders() })
@@ -341,6 +168,12 @@ function ServiceNowTables({ token, onAuthError }) {
 
   const table = useMemo(() => tables.find((t) => t.id === activeId) || null, [tables, activeId])
   const account = useMemo(() => accounts.find((a) => a.id === accId) || null, [accounts, accId])
+  // O(1) lookups for cell rendering instead of scanning savedLinks per cell.
+  const linkById = useMemo(() => new Map(savedLinks.map((l) => [l.id, l])), [savedLinks])
+  const linkByAlias = useMemo(
+    () => new Map(savedLinks.filter((l) => l.alias).map((l) => [l.alias.toLowerCase(), l])),
+    [savedLinks],
+  )
   const sums = table?.sums || {}
   const isSum = (axis, idx) => `${axis}${idx}` in sums
 
@@ -369,7 +202,7 @@ function ServiceNowTables({ token, onAuthError }) {
     if (!v.startsWith(REF_PREFIX)) return { url: v }
     if (linksError) return { url: '', error: '无法加载常用链接' }
     if (!linksLoaded) return { url: '', loading: true }
-    const link = savedLinks.find((l) => l.id === v.slice(REF_PREFIX.length))
+    const link = linkById.get(v.slice(REF_PREFIX.length))
     return link ? { url: link.url.trim() } : { url: '', error: '引用的常用链接已删除' }
   }
 
@@ -388,7 +221,7 @@ function ServiceNowTables({ token, onAuthError }) {
     if (!linksLoaded) return { loading: true }
     const vars = {}
     for (const key of parsed.aliases) {
-      const link = savedLinks.find((l) => (l.alias || '').toLowerCase() === key)
+      const link = linkByAlias.get(key)
       if (!link) return { error: `找不到缩写 [${key}]，请在常用链接里设置` }
       const problem = urlProblem(link.url.trim())
       if (problem) return { error: `[${link.alias}]：${problem}` }
@@ -693,22 +526,29 @@ function ServiceNowTables({ token, onAuthError }) {
     return [resolveCell(raw).url].filter(Boolean)
   }
 
-  const tableUrls = table
-    ? [...new Set(Object.values(table.cells).flatMap(cellUrls))]
-    : []
-  const failedUrls = tableUrls.filter((u) => !urlProblem(u) && counts.values[u]?.error)
+  const urlsOf = (list) => [...new Set(list.flatMap((t) => Object.values(t.cells).flatMap(cellUrls)))]
+  const failedOf = (urls) => urls.filter((u) => !urlProblem(u) && counts.values[u]?.error)
 
-  const refresh = async (onlyFailed = false) => {
-    if (!table) return
-    const cellValues = Object.values(table.cells).filter((raw) => raw.trim())
-    if (!cellValues.length) { setNotice('这个表格还没有配置任何单元格链接'); return }
+  const tableUrls = table ? urlsOf([table]) : []
+  const failedUrls = failedOf(tableUrls)
+  const allFailedUrls = failedOf(urlsOf(tables))
+
+  // scope 'table' = active table; 'all' = every table in one run (shared links are read once).
+  const refresh = async (onlyFailed = false, scope = 'table') => {
+    const scoped = scope === 'all' ? tables : table ? [table] : []
+    if (!scoped.length) return
+    const cellValues = scoped.flatMap((t) => Object.values(t.cells)).filter((raw) => raw.trim())
+    if (!cellValues.length) { setNotice(scope === 'all' ? '还没有配置任何单元格链接' : '这个表格还没有配置任何单元格链接'); return }
     if (!linksLoaded && cellValues.some((raw) => /^(=|ref:)/.test(raw.trim())) && !linksError) {
       setNotice('常用链接还在加载，请稍后再试')
       return
     }
-    const valid = tableUrls.filter((u) => !urlProblem(u))
-    const urls = onlyFailed ? failedUrls : valid
-    if (!urls.length) { setNotice('链接格式不正确，请先修正标红的单元格'); return }
+    const valid = urlsOf(scoped).filter((u) => !urlProblem(u))
+    const urls = onlyFailed ? failedOf(valid) : valid
+    if (!urls.length) {
+      setNotice(onlyFailed ? '没有需要重试的失败项' : '链接格式不正确，请先修正标红的单元格')
+      return
+    }
     const skipped = cellValues.filter((raw) => cellProblem(raw)).length
     setNotice(skipped ? '已跳过格式不正确或已失效的链接' : '')
     setLoginResult(null)
@@ -719,6 +559,8 @@ function ServiceNowTables({ token, onAuthError }) {
     setLiveStatus('正在准备…')
     const runAcc = accId
     let announced = false
+    latestCounts.current = null
+    lastPersist.current = 0
 
     try {
       await streamSSE(
@@ -737,7 +579,7 @@ function ServiceNowTables({ token, onAuthError }) {
                 type: 'status',
                 message: onlyFailed
                   ? `重试 ${urls.length} 个失败的链接`
-                  : `${cellValues.length} 个单元格，共 ${urls.length} 个不同的链接（公式用到的每个链接各读一次）`,
+                  : `${scope === 'all' ? `${scoped.length} 个表格，` : ''}${cellValues.length} 个单元格，共 ${urls.length} 个不同的链接（公式用到的每个链接各读一次）`,
               })
             }
             if (event.type === 'result') {
@@ -748,7 +590,13 @@ function ServiceNowTables({ token, onAuthError }) {
                   values: { ...prev.values, [url]: error ? { error } : { count, source, unconfirmed: !!unconfirmed } },
                   at: new Date().toISOString(),
                 }
-                localStorage.setItem(countsKey(runAcc), JSON.stringify(next))
+                latestCounts.current = next
+                // Persist at most ~once a second during a run; the final value is flushed in finally.
+                const now = Date.now()
+                if (now - lastPersist.current >= 1000) {
+                  lastPersist.current = now
+                  localStorage.setItem(countsKey(runAcc), JSON.stringify(next))
+                }
                 return next
               })
             } else if (event.type === 'identity') {
@@ -767,6 +615,9 @@ function ServiceNowTables({ token, onAuthError }) {
         }
       )
     } finally {
+      if (latestCounts.current) {
+        localStorage.setItem(countsKey(runAcc), JSON.stringify(latestCounts.current))
+      }
       setPending(new Set())
       setBusy(null)
       setStage(null)
@@ -824,19 +675,20 @@ function ServiceNowTables({ token, onAuthError }) {
 
   // Total cell for (r, c), or null for an ordinary cell. The crossing of a total row and total
   // column is left blank. Incomplete totals keep the partial sum with a ⚠ marker (`partial`).
-  const sumCellInfo = (r, c) => {
-    const rowSum = isSum('r', r)
-    const colSum = isSum('c', c)
+  const sumCellInfo = (r, c, t = table) => {
+    const tSums = t.sums || {}
+    const rowSum = `r${r}` in tSums
+    const colSum = `c${c}` in tSums
     if (!rowSum && !colSum) return null
     if (rowSum && colSum) return { kind: 'sum', text: '', partial: false }
     const refs = colSum
-      ? (sums[`c${c}`] || []).map((m) => cellKey(r, m))
-      : (sums[`r${r}`] || []).map((m) => cellKey(m, c))
+      ? (tSums[`c${c}`] || []).map((m) => cellKey(r, m))
+      : (tSums[`r${r}`] || []).map((m) => cellKey(m, c))
     let total = 0
     let counted = 0
     let missing = 0
     for (const k of refs) {
-      const url = table.cells[k]
+      const url = t.cells[k]
       if (!url?.trim()) continue
       const info = cellInfo(url)
       if (info.kind === 'count') { total += info.value; counted += 1 } else missing += 1
@@ -857,24 +709,29 @@ function ServiceNowTables({ token, onAuthError }) {
     />
   )
 
-  const copyResults = async () => {
-    if (!table) return
-    const val = (url) => {
-      const info = cellInfo(url)
-      return info.kind === 'count' ? info.text : ''
+  const copyResults = async (scope = 'table') => {
+    const scoped = scope === 'all' ? tables : table ? [table] : []
+    if (!scoped.length) return
+    let missing = 0
+    const cellText = (t, r, c) => {
+      const s = sumCellInfo(r, c, t)
+      if (s) {
+        if (s.partial) missing += 1
+        return s.partial ? '' : s.text
+      }
+      const raw = t.cells[cellKey(r, c)]
+      const info = cellInfo(raw)
+      if (info.kind === 'count') return info.text
+      if (raw?.trim()) missing += 1
+      return ''
     }
-    const cellText = (r, c) => {
-      const s = sumCellInfo(r, c)
-      if (s) return s.partial ? '' : s.text
-      return val(table.cells[cellKey(r, c)])
-    }
-    const grid = [
-      [table.title, ...table.cols],
-      ...table.rows.map((row, r) => [row, ...table.cols.map((_, c) => cellText(r, c))]),
-    ]
+    const grids = scoped.map((t) => [
+      [t.title, ...t.cols],
+      ...t.rows.map((row, r) => [row, ...t.cols.map((_, c) => cellText(t, r, c))]),
+    ])
 
     const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    const html =
+    const toHtml = (grid) =>
       '<table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse">' +
       grid
         .map((line, i) =>
@@ -882,7 +739,11 @@ function ServiceNowTables({ token, onAuthError }) {
         )
         .join('') +
       '</table>'
-    const text = grid.map((line) => line.join('\t')).join('\n')
+    // The spacer paragraph keeps Outlook/Teams from merging adjacent tables.
+    const html = grids.map(toHtml).join('<p>&nbsp;</p>')
+    const text = grids.map((grid) => grid.map((line) => line.join('\t')).join('\n')).join('\n\n')
+    const what = scoped.length > 1 ? `${scoped.length} 个表格` : ''
+    const suffix = missing ? `，有 ${missing} 个单元格没有数据` : ''
 
     try {
       await navigator.clipboard.write([
@@ -891,11 +752,11 @@ function ServiceNowTables({ token, onAuthError }) {
           'text/plain': new Blob([text], { type: 'text/plain' }),
         }),
       ])
-      setNotice('已复制，可直接粘贴到 Excel / Outlook / Teams')
+      setNotice(`已复制${what}${suffix}，可直接粘贴到 Excel / Outlook / Teams`)
     } catch {
       try {
         await navigator.clipboard.writeText(text)
-        setNotice('已复制为文本（制表符分隔）')
+        setNotice(`已复制${what}为文本（制表符分隔）${suffix}`)
       } catch {
         setNotice('复制失败，请检查浏览器剪贴板权限')
       }
@@ -928,6 +789,18 @@ function ServiceNowTables({ token, onAuthError }) {
     { sep: true },
     { label: '清除登录', onClick: clearLogin, disabled: loading || !account?.logged_in, danger: true },
     { label: '删除身份', onClick: deleteAccount, disabled: loading || accounts.length <= 1, danger: true },
+  ]
+
+  const refreshMenu = [
+    { label: '刷新当前表格', onClick: () => refresh(false) },
+    { label: `刷新全部表格（${tables.length} 个）`, onClick: () => refresh(false, 'all') },
+    { sep: true },
+    { label: `重试全部表格的失败项（${allFailedUrls.length}）`, onClick: () => refresh(true, 'all'), disabled: !allFailedUrls.length },
+  ]
+
+  const copyMenu = [
+    { label: '复制当前表格', onClick: () => copyResults() },
+    { label: `复制全部表格（${tables.length} 个）`, onClick: () => copyResults('all') },
   ]
 
   const tableMenu = [
@@ -1021,15 +894,25 @@ function ServiceNowTables({ token, onAuthError }) {
         {table && (
           <>
             <div className="sn-toolbar">
-              <button className="btn-primary sn-btn" onClick={() => refresh(false)} disabled={loading}>
-                {busy === 'refresh' ? '正在读取…' : '刷新数据'}
-              </button>
+              <div className="sn-split">
+                <button className="btn-primary sn-btn" onClick={() => refresh(false)} disabled={loading}>
+                  {busy === 'refresh' ? '正在读取…' : '刷新数据'}
+                </button>
+                {tables.length > 1 && (
+                  <ActionMenu title="刷新范围" label="▾" items={refreshMenu} disabled={loading} align="left" />
+                )}
+              </div>
               {failedUrls.length > 0 && !loading && (
                 <button className="btn-outline btn-sm" onClick={() => refresh(true)}>
                   重试失败项（{failedUrls.length}）
                 </button>
               )}
-              <button className="btn-outline btn-sm" onClick={copyResults} disabled={loading}>复制结果</button>
+              <div className="sn-split">
+                <button className="btn-outline btn-sm" onClick={() => copyResults()} disabled={loading}>复制结果</button>
+                {tables.length > 1 && (
+                  <ActionMenu title="复制范围" label="▾" items={copyMenu} disabled={loading} align="left" />
+                )}
+              </div>
               <button
                 className="btn-outline btn-sm"
                 onClick={() => { if (editing) flushSave(); setEditing(!editing) }}
