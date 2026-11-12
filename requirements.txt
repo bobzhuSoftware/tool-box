@@ -14,6 +14,7 @@ pystray>=0.19.5
 pywebview>=5.0
 PyMuPDF>=1.24.0
 openpyxl>=3.1.0
+olefile>=0.47
 pycryptodome>=3.23.0
 lz4>=4.4.5
 PyAudioWPatch>=0.2.12.7; sys_platform == "win32"

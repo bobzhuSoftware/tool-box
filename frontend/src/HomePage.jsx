@@ -150,6 +150,15 @@ function HomePage({ onSelectTool, token }) {
       tags: ['Diff', '对比', '文本', 'difflib'],
     },
     {
+      id: 'docxattachments',
+      category: 'scripts',
+      icon: '📎',
+      title: 'Word 附件提取',
+      description:
+        '提取 .docx 中嵌入的附件（PDF、Excel、Word、zip、msg、edi 等 OLE 对象），可逐个下载、打包 ZIP 或直接保存到本地文件夹。',
+      tags: ['Word', 'docx', 'OLE', '附件'],
+    },
+    {
       id: 'timezone',
       icon: '🌍',
       title: '时区转换',

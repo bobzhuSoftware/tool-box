@@ -18,6 +18,7 @@ from app.routers.filecompare import router as filecompare_router
 from app.routers.book import router as book_router
 from app.routers.copilot_chat import router as copilot_chat_router
 from app.routers.discord import router as discord_router
+from app.routers.docx_attachments import router as docx_attachments_router
 from app.routers.home_layout import router as home_layout_router
 from app.routers.pdf import router as pdf_router
 from app.routers.profiles import router as profiles_router
@@ -46,6 +47,7 @@ app.include_router(filecompare_router)
 app.include_router(book_router)
 app.include_router(copilot_chat_router)
 app.include_router(discord_router)
+app.include_router(docx_attachments_router)
 app.include_router(home_layout_router)
 app.include_router(pdf_router)
 app.include_router(profiles_router)
