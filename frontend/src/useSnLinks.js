@@ -16,16 +16,18 @@ export default function useSnLinks(token, onAuthError) {
 
   const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {})
 
-  useEffect(() => {
+  const reload = () =>
     fetch('/api/servicenow/links', { headers: authHeaders() })
       .then(async (res) => {
         if (res.status === 401) { onAuthError?.(); return }
         if (!res.ok) throw new Error(`加载常用链接失败 (${res.status})`)
         setLinks((await res.json()).links)
         setLoaded(true)
+        setLoadError('')
       })
       .catch((e) => setLoadError(e.message))
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { reload() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Saves the full list; resolves to { ok, error }.
   const persist = async (next) => {
@@ -105,5 +107,5 @@ export default function useSnLinks(token, onAuthError) {
     }
   }
 
-  return { links, loaded, loadError, saving, persist, api, stream }
+  return { links, loaded, loadError, saving, persist, api, stream, reload }
 }

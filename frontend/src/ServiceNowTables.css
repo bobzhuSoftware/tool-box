@@ -162,6 +162,15 @@
 .sn-comp-preview code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sn-links-bar-actions { display: flex; gap: 0.4rem; }
 .sn-modal-xl { width: min(66rem, 100%); }
+.sn-drop { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; padding: 1.6rem 1rem; border: 2px dashed #a5b4fc; border-radius: 12px; background: #f8f9ff; color: #444; text-align: center; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.sn-drop:hover, .sn-drop-over { border-color: #4338ca; background: #eef0ff; }
+.sn-drop-icon { font-size: 1.8rem; }
+.sn-drop-sub { color: #888; font-size: 0.8rem; }
+.sn-mig-sections { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.8rem 0; font-size: 0.9rem; }
+.sn-mig-sections label { display: flex; align-items: flex-start; gap: 0.4rem; cursor: pointer; }
+.sn-mig-count { color: #777; font-size: 0.8rem; }
+.sn-mig-warn { margin: 0.5rem 0; color: #b45309; font-size: 0.82rem; }
+.sn-mig-note { margin: 0.3rem 0; color: #555; font-size: 0.8rem; word-break: break-word; }
 .sn-lib-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.6rem; }
 .sn-lib-info { color: #047857; }
 .sn-lib-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 1.2rem; align-items: start; }

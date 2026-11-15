@@ -6,6 +6,7 @@ import useSnLinks, { REF_PREFIX } from './useSnLinks'
 import { parseFormula, evaluateFormula, formulaMentions } from './formula'
 import { moveAxis } from './tableMove'
 import ActionMenu from './SnActionMenu'
+import ServiceNowMigrate from './ServiceNowMigrate'
 import SumPicker from './SnSumPicker'
 import {
   emptyCounts, countsKey, loadCounts, cellKey, removeIndex, removeSumIndex,
@@ -30,6 +31,8 @@ function ServiceNowTables({ token, onAuthError }) {
   const [loginResult, setLoginResult] = useState(null) // { ok, text } shown after login/check
   const [saveState, setSaveState] = useState('idle') // 'idle' | 'pending' | 'saving' | 'saved' | 'error'
   const [drag, setDrag] = useState(null) // { axis, from, over } while a row/column is being dragged
+  const [migrate, setMigrate] = useState(null) // { mode: 'export' | 'import', auto } while the migrate dialog is open
+  const [linksKey, setLinksKey] = useState(0) // bumped after an import so the links panel reloads
   const { progressLog, logContainerRef, addLog, loading, streamSSE } = useSSEStream()
   const linksStore = useSnLinks(token, onAuthError)
   const { links: savedLinks, loaded: linksLoaded, loadError: linksError } = linksStore
@@ -168,6 +171,31 @@ function ServiceNowTables({ token, onAuthError }) {
 
   const table = useMemo(() => tables.find((t) => t.id === activeId) || null, [tables, activeId])
   const account = useMemo(() => accounts.find((a) => a.id === accId) || null, [accounts, accId])
+
+  // A file dragged over the page opens the import dialog; there is no permanent drop area.
+  const loadingRef = useRef(false)
+  loadingRef.current = loading
+  useEffect(() => {
+    const onEnter = (e) => {
+      if (loadingRef.current || !e.dataTransfer?.types?.includes('Files')) return
+      setMigrate((m) => m || { mode: 'import', auto: true })
+    }
+    window.addEventListener('dragenter', onEnter)
+    return () => window.removeEventListener('dragenter', onEnter)
+  }, [])
+
+  const reloadAfterImport = async () => {
+    const res = await fetch('/api/servicenow/config', { headers: authHeaders() })
+    if (res.status === 401) { onAuthError?.(); return }
+    if (res.ok) {
+      const cfg = await res.json()
+      const known = new Set(tables.map((t) => t.id))
+      setTables(cfg.tables)
+      setActiveId((cfg.tables.find((t) => !known.has(t.id)) || cfg.tables[0])?.id ?? null)
+    }
+    await linksStore.reload()
+    setLinksKey((k) => k + 1)
+  }
   // O(1) lookups for cell rendering instead of scanning savedLinks per cell.
   const linkById = useMemo(() => new Map(savedLinks.map((l) => [l.id, l])), [savedLinks])
   const linkByAlias = useMemo(
@@ -810,6 +838,11 @@ function ServiceNowTables({ token, onAuthError }) {
     { label: '删除表格', onClick: deleteTable, danger: true },
   ]
 
+  const migrateMenu = [
+    { label: '导出配置…', onClick: () => setMigrate({ mode: 'export' }) },
+    { label: '导入配置…（也可直接把文件拖进页面）', onClick: () => setMigrate({ mode: 'import', auto: false }) },
+  ]
+
   const saveIndicator =
     saveState === 'error' ? (
       <button className="sn-save sn-save-error" onClick={flushSave}>保存失败，点击重试</button>
@@ -881,6 +914,7 @@ function ServiceNowTables({ token, onAuthError }) {
           {table && (
             <ActionMenu title={`表格管理：${table.title}`} items={tableMenu} disabled={loading} align="left" />
           )}
+          <ActionMenu title="导入 / 导出配置" label="⇅ 迁移" items={migrateMenu} disabled={loading} align="left" />
         </div>
 
         {!table && (
@@ -1025,7 +1059,20 @@ function ServiceNowTables({ token, onAuthError }) {
         )}
       </div>
 
-      <ServiceNowLinks store={linksStore} usageCount={linkUsage} />
+      <ServiceNowLinks key={linksKey} store={linksStore} usageCount={linkUsage} />
+
+      {migrate && (
+        <ServiceNowMigrate
+          mode={migrate.mode}
+          autoOpened={migrate.auto}
+          api={linksStore.api}
+          tables={tables}
+          linkCount={savedLinks.length}
+          beforeExport={flushSave}
+          onClose={() => setMigrate(null)}
+          onImported={reloadAfterImport}
+        />
+      )}
 
       {progressLog.length > 0 && (
         <details className="progress-section sn-log" open={logHasError || undefined}>

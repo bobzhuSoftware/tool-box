@@ -27,6 +27,7 @@
 - **常用链接**：登录身份栏下面一条默认折叠的收藏列表（`🔖 常用链接 (N)`），按软件用户保存（key `servicenow_links`），每条有名称、链接、备注和可选的缩写。可打开、复制、编辑、删除。
 - **单元格引用与公式**：编辑内容时，单元格可以填普通 URL，也可以引用常用链接：输入 `=` 开头的公式 `=[PB]+[PR]`（`[缩写]` 是链接上设置的缩写，支持加法、括号、整数），或用 🔖 按钮整格引用某条链接。设计见 [link-references.md](link-references.md)。
 - **组合条件**：常用链接里的「组合」可以把几条链接的筛选条件勾选后重组成新链接，经典或 simplelist 格式任选，见 [condition-composer.md](condition-composer.md)。
+- **导入 / 导出（迁移）**：标签栏的「⇅ 迁移」可把统计表、常用链接、条件库导出成一个 JSON 文件，在另一台电脑上导入（也可直接把文件拖进页面），说明见 [migrate.md](migrate.md)。
 - **数字来源与可信度**：数字悬停显示来源（REST 接口 / 页面）。REST 返回 0、页面又没能确认时显示橙色的 `0 ⚠`，说明见 [count-consistency-check.md](count-consistency-check.md)。
 - **登录身份**：页面顶部的下拉框。每个身份有独立的 Edge 数据目录和 cookie 文件，可添加、重命名、删除、清除登录状态、重新检查登录，并显示当前登录的用户名。数字缓存（浏览器 `localStorage`，key `sn_counts:<身份id>`）按身份分开。表格定义（链接）在各身份之间共用。
 - 目前**所有身份实际都会以运行服务那台电脑的 Windows 用户登录**，见 [authentication.md](authentication.md) 的“登录身份的限制”。
@@ -58,6 +59,7 @@ stdout：
 常用链接：
 
 - `GET/POST /api/servicenow/links`：读取/保存收藏列表 `{links:[{id,name,url,note,alias}]}`。只接受 `https://*.service-now.com`，最多 200 条；缩写只能含字母、数字、下划线、不以数字开头、最长 20 位，同一用户下不区分大小写、不能重复。
+- `GET /api/servicenow/migrate/export`、`POST /api/servicenow/migrate/preview`、`POST /api/servicenow/migrate/import`：迁移，见 [migrate.md](migrate.md)。
 - `GET /api/servicenow/links/conditions`、`POST /api/servicenow/links/build`、`POST /api/servicenow/links/condition-names`，以及条件库的 `/api/servicenow/conditions`（含 `/delete`、`/cleanup`、`/import/preview`、`/import`）：组合条件与条件库，见 [condition-composer.md](condition-composer.md)。
 
 登录身份（均按当前软件用户隔离）：
