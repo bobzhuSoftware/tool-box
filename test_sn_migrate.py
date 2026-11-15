@@ -78,3 +78,40 @@ def test_conditions_merge_keeps_local_names_and_skips_invalid():
     assert (result.added.conditions, result.skipped.conditions) == (1, 1)
     assert new.names == {"state=1": "Mine", "state=2": "Two"}
     assert set(new.origins) == {"x_case", "x_new"} and new.origins["x_case"]["host"] == "dsv.service-now.com"
+
+
+def test_servicenow_url_hosts():
+    from app.routers.servicenow.common import _is_servicenow_url
+    ok = [
+        "https://dsv.service-now.com/x/a",
+        "https://servicecentral.dsv.com/x/dsva2/enterprise-integrations/list/params/list-id/81b0/tiny-id/lqki",
+    ]
+    bad = [
+        "http://servicecentral.dsv.com/x",
+        "https://servicecentral.dsv.com.evil.com/x",
+        "https://evil-servicecentral.dsv.com/x",
+        "https://dsv.com/x",
+    ]
+    assert all(_is_servicenow_url(u) for u in ok)
+    assert not any(_is_servicenow_url(u) for u in bad)
+
+
+def test_rehost_moves_urls_and_merges_duplicate_links():
+    from app.routers.servicenow.rehost import _rehost_state
+    new_a = URL_A.replace("dsv.service-now.com", "servicecentral.dsv.com")
+    other = "https://other.service-now.com/x/app/simplelist/x_case/params/query/state%3D9"
+    state = _state(
+        links=[
+            SnLink(id="L1", url=URL_A, alias=""),
+            SnLink(id="L2", url=new_a, alias="PR"),  # same URL as L1 once moved; L1 stays and takes the alias
+            SnLink(id="L3", url=other, alias="OT"),
+        ],
+        tables=[SnTable(id="t", title="T", rows=["r"], cols=["a", "b", "c", "d"],
+                        cells={"0,0": URL_A, "0,1": "ref:L2", "0,2": "=[PR]+[OT]", "0,3": other})],
+        origins={"x_case": {"host": "dsv.service-now.com", "app_path": "/x"}},
+    )
+    new, r = _rehost_state(state)
+    assert [(l.id, l.url, l.alias) for l in new.links] == [("L1", new_a, "PR"), ("L3", other, "OT")]
+    assert new.tables[0].cells == {"0,0": new_a, "0,1": "ref:L1", "0,2": "=[PR]+[OT]", "0,3": other}
+    assert new.origins["x_case"]["host"] == "servicecentral.dsv.com"
+    assert (r.links_changed, r.links_merged, r.cells_changed, r.refs_remapped, r.origins_changed) == (1, 1, 1, 1, 1)

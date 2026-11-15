@@ -17,7 +17,7 @@ from app.core.settings import _get_user_setting
 from .accounts import (
     _account_dir, _load_accounts, _migrate_legacy_session, _require_account, _save_accounts,
 )
-from .common import _DEFAULT_ACCOUNT_ID, _MAX_URLS, _REPO_ROOT, _is_servicenow_url, _run_lock
+from .common import _DEFAULT_ACCOUNT_ID, _HOST_PROBLEM, _MAX_URLS, _REPO_ROOT, _is_servicenow_url, _run_lock
 
 router = APIRouter()
 
@@ -173,7 +173,7 @@ async def run_stream(req: SnRunRequest, user: User = Depends(require_user)):
     if len(urls) > _MAX_URLS:
         raise HTTPException(status_code=400, detail=f"链接过多（最多 {_MAX_URLS} 个）")
     if any(not _is_servicenow_url(u) for u in urls):
-        raise HTTPException(status_code=400, detail="只支持 https://*.service-now.com 的链接")
+        raise HTTPException(status_code=400, detail=_HOST_PROBLEM)
 
     state = _load_accounts(user.id)
     acc = _require_account(state, req.account or state.selected)

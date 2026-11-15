@@ -46,7 +46,7 @@ from app.core import sn_query  # noqa: E402
 
 LOGIN_WAIT_SECS = 300
 HEADLESS_SSO_SECS = 30
-HOME_URL = "https://dsv.service-now.com/now/nav/ui/home"
+HOME_URL = "https://servicecentral.dsv.com/now/nav/ui/home"
 
 _LEGACY_SESSION_FILE = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "VideoTranscript", "servicenow-session.json"
@@ -72,9 +72,9 @@ def done(data: dict) -> None:
 
 def _on_servicenow(url: str) -> bool:
     u = (url or "").lower()
-    host = urlparse(u).netloc
+    host = urlparse(u).hostname or ""
     # auth_redirect.do is the transient hop that bounces to the SSO, not a signed-in page.
-    return (host.endswith("service-now.com") and "/login.do" not in u
+    return (sn_query.is_servicenow_host(host) and "/login.do" not in u
             and "/sso/" not in u and "/auth_redirect.do" not in u)
 
 

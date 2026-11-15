@@ -5,6 +5,7 @@ import re
 import threading
 from urllib.parse import urlparse
 
+from app.core import sn_query
 from app.core.settings import _get_user_setting
 
 # Repo root (four levels up from app/routers/servicenow/common.py), where the *_worker.py scripts live.
@@ -68,7 +69,9 @@ def _load_model_setting(user_id: str, key: str, model, default):
     return default()
 
 
+_HOST_PROBLEM = "只支持 https://*.service-now.com 或 https://servicecentral.dsv.com 的链接"
+
+
 def _is_servicenow_url(url: str) -> bool:
     p = urlparse(url)
-    host = (p.hostname or "").lower()
-    return p.scheme == "https" and (host == "service-now.com" or host.endswith(".service-now.com"))
+    return p.scheme == "https" and sn_query.is_servicenow_host(p.hostname or "")

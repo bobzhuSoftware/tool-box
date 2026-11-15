@@ -15,7 +15,7 @@ from .common import (
     _ALIAS_RE, _CONDITION_LIBRARY_KEY, _CONDITION_NAMES_KEY, _CONDITION_TABLES_KEY, _LINKS_KEY,
     _MAX_BUILD_CONDITIONS, _MAX_CONDITION_NAMES, _MAX_IMPORT_URLS, _MAX_LIBRARY_CONDITIONS, _MAX_LINKS,
     _MAX_NAME_ENTRIES, _MAX_NAME_FIELDS, _MAX_NAME_TABLES, _MAX_NAME_VALUES, _TABLE_RE, _VALUE_NAMES_KEY,
-    _is_servicenow_url, _load_json_setting, _load_model_setting,
+    _HOST_PROBLEM, _is_servicenow_url, _load_json_setting, _load_model_setting,
 )
 from .worker import _stream_worker
 
@@ -52,7 +52,7 @@ def save_links(body: SnLinks, user: User = Depends(require_user)) -> SnLinks:
     for link in body.links:
         url = link.url.strip()
         if len(url) > 4000 or not _is_servicenow_url(url):
-            raise HTTPException(status_code=400, detail="只支持 https://*.service-now.com 的链接")
+            raise HTTPException(status_code=400, detail=_HOST_PROBLEM)
         alias = link.alias.strip()
         if alias:
             if not _ALIAS_RE.match(alias):
@@ -481,7 +481,7 @@ def _inspect_import_url(
 ) -> tuple[SnImportItem, dict]:
     item = SnImportItem(url=url)
     if len(url) > 4000 or not _is_servicenow_url(url):
-        item.error = "只支持 https://*.service-now.com 的链接"
+        item.error = _HOST_PROBLEM
         return item, {}
     info = sn_query.parse_list_url(url)
     if info["kind"] == "savedlist":
@@ -538,7 +538,7 @@ async def resolve_import_links(body: SnResolveRequest, user: User = Depends(requ
     same browser session and saved."""
     urls = _clean_import_urls(body.urls)
     if any(len(u) > 4000 or not _is_servicenow_url(u) for u in urls):
-        raise HTTPException(status_code=400, detail="只支持 https://*.service-now.com 的链接")
+        raise HTTPException(status_code=400, detail=_HOST_PROBLEM)
     if any(sn_query.parse_list_url(u)["kind"] != "savedlist" for u in urls):
         raise HTTPException(status_code=400, detail="只能解析已保存列表链接")
     state = _load_accounts(user.id)
@@ -567,7 +567,7 @@ async def read_condition_names(body: SnNamesRequest, user: User = Depends(requir
     if body.urls:
         for url in _clean_import_urls(body.urls):
             if len(url) > 4000 or not _is_servicenow_url(url):
-                raise HTTPException(status_code=400, detail="只支持 https://*.service-now.com 的链接")
+                raise HTTPException(status_code=400, detail=_HOST_PROBLEM)
             info = sn_query.parse_list_url(url)
             if info["table"]:
                 units = [f for f in sn_query.split_query(info["query"])[0] if len(f) <= 1000]

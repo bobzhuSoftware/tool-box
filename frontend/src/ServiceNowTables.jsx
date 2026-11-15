@@ -191,7 +191,7 @@ function ServiceNowTables({ token, onAuthError }) {
       const cfg = await res.json()
       const known = new Set(tables.map((t) => t.id))
       setTables(cfg.tables)
-      setActiveId((cfg.tables.find((t) => !known.has(t.id)) || cfg.tables[0])?.id ?? null)
+      setActiveId((cfg.tables.find((t) => !known.has(t.id)) || cfg.tables.find((t) => t.id === activeId) || cfg.tables[0])?.id ?? null)
     }
     await linksStore.reload()
     setLinksKey((k) => k + 1)
@@ -841,6 +841,8 @@ function ServiceNowTables({ token, onAuthError }) {
   const migrateMenu = [
     { label: '导出配置…', onClick: () => setMigrate({ mode: 'export' }) },
     { label: '导入配置…（也可直接把文件拖进页面）', onClick: () => setMigrate({ mode: 'import', auto: false }) },
+    { sep: true },
+    { label: '把旧链接迁移到新平台…', onClick: () => setMigrate({ mode: 'rehost' }) },
   ]
 
   const saveIndicator =

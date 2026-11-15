@@ -43,7 +43,15 @@ export const removeSumIndex = (sums, axis, idx) => {
   return out
 }
 
-// Mirrors the server rule (https://*.service-now.com) plus the list forms the worker can parse.
+// Mirrors the server rule (app/core/sn_query.py is_servicenow_host).
+const SERVICENOW_HOSTS = ['servicecentral.dsv.com']
+export const HOST_PROBLEM = '只支持 https://*.service-now.com 或 https://servicecentral.dsv.com 的链接'
+export const isServiceNowHost = (hostname) => {
+  const host = hostname.toLowerCase().replace(/\.$/, '')
+  return host === 'service-now.com' || host.endsWith('.service-now.com') || SERVICENOW_HOSTS.includes(host)
+}
+
+// The host rule plus the list forms the worker can parse.
 export const urlProblem = (url) => {
   const u = url.trim()
   if (!u) return ''
@@ -53,10 +61,7 @@ export const urlProblem = (url) => {
   } catch {
     return '不是有效的链接'
   }
-  const host = parsed.hostname.toLowerCase()
-  if (parsed.protocol !== 'https:' || !(host === 'service-now.com' || host.endsWith('.service-now.com'))) {
-    return '只支持 https://*.service-now.com 的链接'
-  }
+  if (parsed.protocol !== 'https:' || !isServiceNowHost(parsed.hostname)) return HOST_PROBLEM
   const isList = parsed.pathname.includes('/simplelist/') || /_list\.do/i.test(`${parsed.pathname}${parsed.search}`)
   if (!isList) return '不是 simplelist 或经典 _list.do 列表链接'
   return ''

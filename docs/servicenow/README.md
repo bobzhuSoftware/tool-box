@@ -7,6 +7,7 @@
 - 本文：功能、文件、接口、取数方式、测试。
 - [authentication.md](authentication.md)：登录链路、会话与浏览器状态如何保存、登录身份、排查与重置。
 - [experiments.md](experiments.md)：所有实验的过程与结果（含已被证伪的假设），改动登录相关代码前先看这篇。
+- 本目录文档基于旧平台 `dsv.service-now.com`。新平台 `servicecentral.dsv.com` 的探测与适配见 [../servicenow-servicecentral/README.md](../servicenow-servicecentral/README.md)。
 
 ## 文件
 
@@ -60,6 +61,7 @@ stdout：
 
 - `GET/POST /api/servicenow/links`：读取/保存收藏列表 `{links:[{id,name,url,note,alias}]}`。只接受 `https://*.service-now.com`，最多 200 条；缩写只能含字母、数字、下划线、不以数字开头、最长 20 位，同一用户下不区分大小写、不能重复。
 - `GET /api/servicenow/migrate/export`、`POST /api/servicenow/migrate/preview`、`POST /api/servicenow/migrate/import`：迁移，见 [migrate.md](migrate.md)。
+- `POST /api/servicenow/migrate/rehost/preview`、`POST /api/servicenow/migrate/rehost`：把旧域名的链接迁移到新平台域名，见 [../servicenow-servicecentral/README.md](../servicenow-servicecentral/README.md)。
 - `GET /api/servicenow/links/conditions`、`POST /api/servicenow/links/build`、`POST /api/servicenow/links/condition-names`，以及条件库的 `/api/servicenow/conditions`（含 `/delete`、`/cleanup`、`/import/preview`、`/import`）：组合条件与条件库，见 [condition-composer.md](condition-composer.md)。
 
 登录身份（均按当前软件用户隔离）：

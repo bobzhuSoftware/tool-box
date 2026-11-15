@@ -13,6 +13,13 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 _FIELD_RE = re.compile(r"^[a-z_][a-z0-9_.]*")
 _COMPARISONS = ("!=", ">=", "<=", "=", ">", "<")
 DEFAULT_APP_PATH = "/x/dsva2/enterprise-integrations"
+# The old *.service-now.com instance and the new ServiceCentral portal (custom domain, exact match only).
+SERVICENOW_HOSTS = ("servicecentral.dsv.com",)
+
+
+def is_servicenow_host(host: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return host == "service-now.com" or host.endswith(".service-now.com") or host in SERVICENOW_HOSTS
 
 # Friendly names for conditions seen in this deployment's saved links.
 KNOWN_LABELS = {

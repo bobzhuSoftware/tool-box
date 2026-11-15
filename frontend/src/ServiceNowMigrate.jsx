@@ -38,9 +38,19 @@ export default function ServiceNowMigrate({
   const [preview, setPreview] = useState(null)
   const [merge, setMerge] = useState('merge') // 'merge' | 'replace'
   const [done, setDone] = useState(null)
+  const [rehost, setRehost] = useState(null) // preview (then result) of the host migration
   const fileInput = useRef(null)
   const seq = useRef(0)
 
+  useEffect(() => {
+    if (mode !== 'rehost') return
+    setBusy(true)
+    beforeExport?.().then(() => api('/api/servicenow/migrate/rehost/preview', 'POST', {})).then((res) => {
+      setBusy(false)
+      if (!res.ok) { setError(res.error || '无法读取当前配置'); return }
+      setRehost(res.data)
+    })
+  }, [mode]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose() }
     document.addEventListener('keydown', onKey)
@@ -132,6 +142,20 @@ export default function ServiceNowMigrate({
     await onImported(res.data)
   }
 
+  const doRehost = async () => {
+    setBusy(true)
+    setError('')
+    await beforeExport?.()
+    const backup = await api(`/api/servicenow/migrate/export?${exportQuery(SECTIONS)}`)
+    if (!backup.ok) { setBusy(false); setError(backup.error || '备份失败，已取消迁移'); return }
+    download(backup.data, `servicenow-backup-${stamp(true)}.json`)
+    const res = await api('/api/servicenow/migrate/rehost', 'POST')
+    setBusy(false)
+    if (!res.ok) { setError(res.error || '迁移失败'); return }
+    setRehost(res.data)
+    await onImported(res.data)
+  }
+
   const line = (s) => {
     const have = preview.available[s]
     const cur = preview.current[s]
@@ -155,7 +179,7 @@ export default function ServiceNowMigrate({
     ...(info.dangling_refs ? [`${info.dangling_refs} 个单元格引用的链接找不到，导入后会显示为失效引用（建议同时导入常用链接）`] : []),
   ] : []
 
-  const title = mode === 'export' ? '导出配置' : '导入配置'
+  const title = { export: '导出配置', import: '导入配置', rehost: '迁移到新平台' }[mode]
 
   return (
     <div
@@ -194,6 +218,51 @@ export default function ServiceNowMigrate({
                 {busy ? '导出中…' : '导出'}
               </button>
               <button className="btn-outline btn-sm" onClick={onClose} disabled={busy}>取消</button>
+            </div>
+          </>
+        )}
+
+        {mode === 'rehost' && (
+          <>
+            <p className="sn-hint">
+              把统计表单元格、常用链接和条件库里指向 {rehost?.old_host || 'dsv.service-now.com'} 的链接，
+              改成 {rehost?.new_host || 'servicecentral.dsv.com'}，路径和筛选条件不变。旧平台的数据已经停止更新，继续用旧链接读到的数字是错的。
+            </p>
+            {rehost && !rehost.applied && (
+              <div className="sn-mig-sections">
+                <div>常用链接：{rehost.links_changed} 条改为新域名{rehost.links_merged ? `，其中 ${rehost.links_merged} 条与别的链接重复，会合并为一条` : ''}</div>
+                <div>统计表单元格：{rehost.cells_changed} 个改为新域名{rehost.refs_remapped ? `，${rehost.refs_remapped} 个引用改指向合并后的链接` : ''}</div>
+                <div>条件库的表来源：{rehost.origins_changed} 个</div>
+              </div>
+            )}
+            {rehost && !rehost.applied && !rehost.links_changed && !rehost.cells_changed && !rehost.origins_changed && (
+              <p className="sn-hint">没有需要迁移的内容，所有链接都已经是新域名。</p>
+            )}
+            {rehost?.applied && (
+              <>
+                <p className="sn-lib-info">
+                  ✓ 已迁移：{rehost.links_changed} 条链接、{rehost.cells_changed} 个单元格、{rehost.origins_changed} 个表来源
+                </p>
+                <p className="sn-hint">旧链接的数字不会带过来，请点「刷新」读取新平台的数据。</p>
+              </>
+            )}
+            {!rehost?.applied && <p className="sn-hint">执行前会自动下载一份当前配置的备份。</p>}
+            {error && <p className="sn-links-error" role="alert">{error}</p>}
+            <div className="sn-links-form-actions">
+              {rehost?.applied ? (
+                <button className="btn-primary sn-btn" onClick={onClose}>完成</button>
+              ) : (
+                <>
+                  <button
+                    className="btn-primary sn-btn"
+                    onClick={doRehost}
+                    disabled={busy || !rehost || !(rehost.links_changed || rehost.cells_changed || rehost.origins_changed)}
+                  >
+                    {busy ? '处理中…' : '迁移'}
+                  </button>
+                  <button className="btn-outline btn-sm" onClick={onClose} disabled={busy}>取消</button>
+                </>
+              )}
             </div>
           </>
         )}

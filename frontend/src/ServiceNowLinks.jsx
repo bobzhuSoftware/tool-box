@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import LinkComposer from './LinkComposer'
 import ConditionLibrary from './ConditionLibrary'
 import { linkKind, KIND_LABEL } from './useSnLinks'
+import { isServiceNowHost, HOST_PROBLEM } from './serviceNowUtils'
 
 const OPEN_KEY = 'sn_links_open'
 const KIND_KEY = 'sn_links_kind'
@@ -14,7 +15,6 @@ const ALIAS_RE = /^[A-Za-z_][A-Za-z0-9_]{0,19}$/
 
 const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}${Math.random().toString(16).slice(2)}`)
 
-// Mirrors the server rule: https://*.service-now.com
 const urlProblem = (url) => {
   const u = url.trim()
   if (!u) return '请输入链接'
@@ -24,10 +24,7 @@ const urlProblem = (url) => {
   } catch {
     return '不是有效的链接'
   }
-  const host = parsed.hostname.toLowerCase()
-  if (parsed.protocol !== 'https:' || !(host === 'service-now.com' || host.endsWith('.service-now.com'))) {
-    return '只支持 https://*.service-now.com 的链接'
-  }
+  if (parsed.protocol !== 'https:' || !isServiceNowHost(parsed.hostname)) return HOST_PROBLEM
   return ''
 }
 
