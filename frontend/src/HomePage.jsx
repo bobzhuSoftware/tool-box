@@ -159,6 +159,15 @@ function HomePage({ onSelectTool, token }) {
       tags: ['Word', 'docx', 'OLE', '附件'],
     },
     {
+      id: 'edifact',
+      category: 'scripts',
+      icon: '🧾',
+      title: 'EDIFACT 结构查看',
+      description:
+        '选择 UN/EDIFACT 版本与消息类型（如 D01B / IFTMIN），自动下载官方目录数据，生成无广告、可搜索的本地 HTML：段/组层级、M/C、重复次数、元素与代码值。',
+      tags: ['EDIFACT', 'ITXA', 'Mapping', 'HTML'],
+    },
+    {
       id: 'timezone',
       icon: '🌍',
       title: '时区转换',

@@ -22,6 +22,7 @@ import ScreenRecorder from './ScreenRecorder'
 import ExcelSearch from './ExcelSearch'
 import FileCompare from './FileCompare'
 import DocxAttachments from './DocxAttachments'
+import EdifactViewer from './EdifactViewer'
 import SessionReader from './SessionReader'
 import SubtitleProcessor from './SubtitleProcessor'
 import TimezoneConverter from './TimezoneConverter'
@@ -218,6 +219,7 @@ function App() {
       {currentTool === 'excelsearch' && (<ExcelSearch token={token} onAuthError={handleLogout} />)}
       {currentTool === 'filecompare' && (<FileCompare token={token} onAuthError={handleLogout} />)}
       {currentTool === 'docxattachments' && (<DocxAttachments token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'edifact' && (<EdifactViewer token={token} onAuthError={handleLogout} />)}
       {currentTool === 'sessionreader' && (<SessionReader token={token} onAuthError={handleLogout} />)}
       {currentTool === 'subtitle' && (<SubtitleProcessor token={token} onAuthError={handleLogout} />)}
       {currentTool === 'timezone' && (<TimezoneConverter token={token} onAuthError={handleLogout} />)}

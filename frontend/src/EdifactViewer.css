@@ -1,0 +1,100 @@
+.edx-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.edx-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.edx-grow {
+  flex: 1;
+  min-width: 220px;
+}
+
+.edx-field select,
+.edx-field input {
+  padding: 0.7rem 1rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  background: #fff;
+}
+
+.edx-field select:focus,
+.edx-field input:focus {
+  outline: none;
+  border-color: #646cff;
+}
+
+.edx-go {
+  padding: 0.7rem 1.5rem;
+  background: #646cff;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.edx-go:hover:not(:disabled) {
+  background: #535bf2;
+}
+
+.edx-go:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.edx-check {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.9rem;
+  color: #555;
+  cursor: pointer;
+}
+
+.edx-hint {
+  color: #b54708;
+  font-size: 0.9rem;
+}
+
+.edx-result {
+  margin-top: 1rem;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+
+.edx-result-bar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #eee;
+}
+
+.edx-saved {
+  color: #888;
+  font-size: 0.8rem;
+}
+
+.edx-spacer {
+  flex: 1;
+}
+
+.edx-frame {
+  display: block;
+  width: 100%;
+  height: 75vh;
+  border: none;
+}
