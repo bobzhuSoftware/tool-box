@@ -13,7 +13,7 @@ import zipfile
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -412,7 +412,7 @@ async def teams_transcript_stream(req: TeamsTranscriptRequest, user: User = Depe
 @router.get("/api/teams-transcript/download/{job_id}")
 def download_vtt(
     job_id: str,
-    chunk_minutes: int = 0,
+    chunk_minutes: int = Query(0, ge=0, le=600),
     user: User = Depends(user_from_token_or_header),
 ):
     _cleanup_old_vtt()

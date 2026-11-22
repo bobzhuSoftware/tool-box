@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import EdgeProfilePicker from './EdgeProfilePicker'
+import SplitControl from './SplitControl'
+import { useSplitMinutes } from './useSplitMinutes'
 
 /**
  * Teams Transcript tool — queue-based mode.
@@ -12,6 +14,7 @@ import EdgeProfilePicker from './EdgeProfilePicker'
  */
 function TeamsTranscript({ token, onAuthError, initialJob, onClearInitialJob }) {
   const [url, setUrl] = useState('')
+  const [splitMinutes, saveSplitMinutes] = useSplitMinutes(token)
   const [result, setResult] = useState(null)      // { job_id, name, lang }
   const [progressLog, setProgressLog] = useState([])
   const [loading, setLoading] = useState(false)   // true while polling a running job
@@ -149,7 +152,7 @@ function TeamsTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
     window.open(`/api/teams-transcript/download/${result.job_id}${authParam}`, '_blank')
   }
 
-  const handleDownloadSplit = async (chunkMinutes = 30) => {
+  const handleDownloadSplit = async (chunkMinutes) => {
     if (!result?.job_id) return
     try {
       const authParam = token ? `&token=${encodeURIComponent(token)}` : ''
@@ -234,13 +237,12 @@ function TeamsTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
             <button className="btn-primary" onClick={handleDownload}>
               Download
             </button>
-            <button
-              className="btn-outline"
-              onClick={() => handleDownloadSplit(30)}
-              title="Download as a ZIP of multiple WebVTT files, each covering 30 minutes"
-            >
-              ✂ Split by 30 min (ZIP)
-            </button>
+            <SplitControl
+              minutes={splitMinutes}
+              saveMinutes={saveSplitMinutes}
+              onSplit={handleDownloadSplit}
+              title="Download as a ZIP of multiple files, each covering N minutes"
+            />
           </div>
         </div>
       )}

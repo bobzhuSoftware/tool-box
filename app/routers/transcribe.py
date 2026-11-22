@@ -12,7 +12,7 @@ import zipfile
 from datetime import datetime, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -454,7 +454,7 @@ def delete_history(job_id: str, user: User = Depends(require_user)):
 
 
 @router.get("/api/download/{job_id}")
-def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int = 0, user: User = Depends(user_from_token_or_header)):
+def download_transcript(job_id: str, timestamps: bool = True, chunk_minutes: int = Query(0, ge=0, le=600), user: User = Depends(user_from_token_or_header)):
     # Try in-memory cache first, fall back to database
     job = jobs.get(job_id)
     if not job:

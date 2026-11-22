@@ -22,6 +22,7 @@ from app.routers.discord import router as discord_router
 from app.routers.docx_attachments import router as docx_attachments_router
 from app.routers.home_layout import router as home_layout_router
 from app.routers.pdf import router as pdf_router
+from app.routers.preferences import router as preferences_router
 from app.routers.profiles import router as profiles_router
 from app.routers.screen import router as screen_router
 from app.routers.servicenow import router as servicenow_router
@@ -52,6 +53,7 @@ app.include_router(discord_router)
 app.include_router(docx_attachments_router)
 app.include_router(home_layout_router)
 app.include_router(pdf_router)
+app.include_router(preferences_router)
 app.include_router(profiles_router)
 app.include_router(screen_router)
 app.include_router(servicenow_router)

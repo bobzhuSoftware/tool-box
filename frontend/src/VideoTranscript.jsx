@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import CookieSettings from './CookieSettings'
+import SplitControl from './SplitControl'
+import { useSplitMinutes } from './useSplitMinutes'
 
 function formatDate(iso) {
   const d = new Date(iso)
@@ -13,6 +15,7 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
     tokenRef.current ? { Authorization: `Bearer ${tokenRef.current}` } : {}
 
   const [inputMode, setInputMode] = useState('url')
+  const [splitMinutes, saveSplitMinutes] = useSplitMinutes(token)
   const [platform, setPlatform] = useState('youtube')
   const [url, setUrl] = useState('')
   const [uploadFile, setUploadFile] = useState(null)
@@ -681,10 +684,11 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
             <button className="btn-outline" onClick={() => handleDownload(result.job_id, false)}>
               Download plain text
             </button>
-            <button className="btn-outline" onClick={() => handleDownload(result.job_id, true, 30)}
-              title="Download as a ZIP of multiple files, each covering 30 minutes">
-              ✂ Split by 30 min (ZIP)
-            </button>
+            <SplitControl
+              minutes={splitMinutes}
+              saveMinutes={saveSplitMinutes}
+              onSplit={(m) => handleDownload(result.job_id, true, m)}
+            />
           </div>
         </div>
       )}
@@ -693,14 +697,24 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
       <div className="history-section">
         <h2>Recent Transcripts</h2>
         {!historyLoading && history.length > 0 && (
-          <div className="history-filter">
-            <input
-              type="text"
-              placeholder="🔍 Filter by title..."
-              value={historyFilter}
-              onChange={(e) => setHistoryFilter(e.target.value)}
-            />
-          </div>
+          <>
+            <div className="history-filter">
+              <input
+                type="text"
+                placeholder="🔍 Filter by title..."
+                value={historyFilter}
+                onChange={(e) => setHistoryFilter(e.target.value)}
+              />
+            </div>
+            <div className="history-split-settings">
+              <SplitControl
+                minutes={splitMinutes}
+                saveMinutes={saveSplitMinutes}
+                prefix="✂ Split length"
+                unit="min (used by the Split buttons below)"
+              />
+            </div>
+          </>
         )}
         {historyLoading ? (
           <p className="history-empty">Loading...</p>
@@ -725,9 +739,9 @@ function VideoTranscript({ token, onAuthError, initialJob, onClearInitialJob }) 
                   <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, false)}>
                     ↓ Plain
                   </button>
-                  <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, true, 30)}
-                    title="Download as a ZIP of multiple files, each covering 30 minutes">
-                    ✂ Split
+                  <button className="btn-sm btn-outline" onClick={() => handleDownload(item.job_id, true, splitMinutes)}
+                    title={`Download as a ZIP of multiple files, each covering ${splitMinutes} minutes`}>
+                    ✂ Split {splitMinutes}m
                   </button>
                   <button className="btn-sm btn-danger" onClick={() => handleDelete(item.job_id)}>
                     ✕

@@ -1208,6 +1208,7 @@
 .split-controls {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1295,6 +1296,11 @@
 
 .history-filter input:focus {
   border-color: #6c63ff;
+}
+
+.history-split-settings {
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
 }
 
 .history-list {

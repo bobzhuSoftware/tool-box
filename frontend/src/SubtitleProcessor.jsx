@@ -1,4 +1,6 @@
 import { useRef, useState } from 'react'
+import SplitControl from './SplitControl'
+import { useSplitMinutes } from './useSplitMinutes'
 
 const ACCEPTED_EXTS = ['.vtt', '.srt', '.txt']
 
@@ -8,7 +10,7 @@ function SubtitleProcessor({ token, onAuthError }) {
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const [dragOver, setDragOver] = useState(false)
-  const [splitMinutes, setSplitMinutes] = useState(30)
+  const [splitMinutes, saveSplitMinutes] = useSplitMinutes(token)
   const fileInputRef = useRef(null)
 
   const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {})
@@ -180,24 +182,14 @@ function SubtitleProcessor({ token, onAuthError }) {
               下载纯文本
             </button>
             {hasTimestamps && (
-              <span className="split-controls">
-                <button
-                  className="btn-outline"
-                  onClick={() => handleDownload(true, splitMinutes)}
-                  title="打包为 ZIP，每个文件覆盖 N 分钟（保留时间戳）"
-                >
-                  ✂ 按 X 分钟拆分（ZIP）
-                </button>
-                <input
-                  type="number"
-                  min={1}
-                  value={splitMinutes}
-                  onChange={(e) => setSplitMinutes(Math.max(1, Number(e.target.value) || 1))}
-                  className="split-input"
-                  title="每个分段的分钟数"
-                />
-                <span className="split-unit">分钟</span>
-              </span>
+              <SplitControl
+                minutes={splitMinutes}
+                saveMinutes={saveSplitMinutes}
+                onSplit={(m) => handleDownload(true, m)}
+                label="✂ 拆分（ZIP）"
+                unit="分钟 / 份"
+                title="打包为 ZIP，每个文件覆盖 N 分钟（保留时间戳）"
+              />
             )}
           </div>
           {!hasTimestamps && (
