@@ -20,6 +20,7 @@ from app.routers.book import router as book_router
 from app.routers.copilot_chat import router as copilot_chat_router
 from app.routers.discord import router as discord_router
 from app.routers.docx_attachments import router as docx_attachments_router
+from app.routers.gefeg import router as gefeg_router
 from app.routers.home_layout import router as home_layout_router
 from app.routers.pdf import router as pdf_router
 from app.routers.preferences import router as preferences_router
@@ -33,6 +34,7 @@ from app.routers.teams_transcript import router as teams_transcript_router
 from app.routers.threads import router as threads_router
 from app.routers.transcribe import router as transcribe_router
 from app.routers.wechat import router as wechat_router
+from app.routers.xsd import router as xsd_router
 
 # Repo root (one level up from the app/ package), where frontend/dist lives.
 _REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -51,6 +53,7 @@ app.include_router(book_router)
 app.include_router(copilot_chat_router)
 app.include_router(discord_router)
 app.include_router(docx_attachments_router)
+app.include_router(gefeg_router)
 app.include_router(home_layout_router)
 app.include_router(pdf_router)
 app.include_router(preferences_router)
@@ -64,6 +67,7 @@ app.include_router(teams_transcript_router)
 app.include_router(threads_router)
 app.include_router(transcribe_router)
 app.include_router(wechat_router)
+app.include_router(xsd_router)
 
 
 # ---------------------------------------------------------------------------

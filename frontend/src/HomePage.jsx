@@ -168,6 +168,24 @@ function HomePage({ onSelectTool, token }) {
       tags: ['EDIFACT', 'ITXA', 'Mapping', 'HTML'],
     },
     {
+      id: 'xsd',
+      category: 'scripts',
+      icon: '🧬',
+      title: 'XSD 结构查看',
+      description:
+        '导入本地 XSD 压缩包（或多个 .xsd），解析 import/include 关联，生成可搜索、可折叠的本地 HTML：元素层级、基数、类型、属性、枚举与约束。',
+      tags: ['XSD', 'XML', 'Schema', 'HTML'],
+    },
+    {
+      id: 'gefeg',
+      category: 'scripts',
+      icon: '📑',
+      title: 'GEFEG Guideline Viewer',
+      description:
+        'Upload a Message Implementation Guideline PDF exported from GEFEG.FX and browse it as a searchable field tree: occurrence, type, Map Instructions (condition / instruction / info) and the changes summary. Saved to the database, with per-node implementation progress tracking.',
+      tags: ['GEFEG', 'Guideline', 'PDF', 'Mapping'],
+    },
+    {
       id: 'timezone',
       icon: '🌍',
       title: '时区转换',

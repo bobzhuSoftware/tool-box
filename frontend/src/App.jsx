@@ -23,6 +23,8 @@ import ExcelSearch from './ExcelSearch'
 import FileCompare from './FileCompare'
 import DocxAttachments from './DocxAttachments'
 import EdifactViewer from './EdifactViewer'
+import XsdViewer from './XsdViewer'
+import GefegViewer from './GefegViewer'
 import SessionReader from './SessionReader'
 import SubtitleProcessor from './SubtitleProcessor'
 import TimezoneConverter from './TimezoneConverter'
@@ -220,6 +222,8 @@ function App() {
       {currentTool === 'filecompare' && (<FileCompare token={token} onAuthError={handleLogout} />)}
       {currentTool === 'docxattachments' && (<DocxAttachments token={token} onAuthError={handleLogout} />)}
       {currentTool === 'edifact' && (<EdifactViewer token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'xsd' && (<XsdViewer token={token} onAuthError={handleLogout} />)}
+      {currentTool === 'gefeg' && (<GefegViewer token={token} onAuthError={handleLogout} />)}
       {currentTool === 'sessionreader' && (<SessionReader token={token} onAuthError={handleLogout} />)}
       {currentTool === 'subtitle' && (<SubtitleProcessor token={token} onAuthError={handleLogout} />)}
       {currentTool === 'timezone' && (<TimezoneConverter token={token} onAuthError={handleLogout} />)}
